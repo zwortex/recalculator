@@ -15,9 +15,31 @@ Red [
         be anyway. Keep in mind however that the intention of the author was not to take the straightest route, 
         rather to explore whatever capabilities the language offers.
     }
-    Version: 0.1.0
-    Date: 06/05/2021
+    Version: 0.2.0
+    Date: 31/07/2021
     Changelog: {
+        0.2.0 - 31/07/2021
+            * added:
+                - dynamic display adjusted when the window is resized
+                - new stack functions : 
+                    binary and unary operations on stack,
+                    moving expressions up and down, to the top or bottom, 
+                    swapping expressions, rolling expressions,
+                    duplicating the selected expression
+                - new selection functions :
+                    move the selection up and down, deselect
+                - recalculator/myfont-name to change the font used throughout the calculator
+            * fixed: 
+                - 0! = 1
+                - 3 E 0.5 now marked as invalid
+                - random numbers generated only once
+                - menu closed on escape key or on a mouse click outside of the menu
+            * house keeping:
+                - improved interaction between the selection in the stack and the buffer (linked-expr)
+                  for modifying the selected expression, or adding a new one, for removing an expression
+                  from the stack
+                - other structural changes in order to compile
+
         0.1.0 - 06/05/2021
             * initial version
     }
@@ -51,7 +73,8 @@ Red [
         
         You may explore the following : standard operations ; extended fonctions in the option menus ;
         computations may be stacked/unstacked, modified or combined using variables (#1, #2...) ;
-        undo/redo ; clear either a character, a line or the entire stack ; various parenthesis.
+        undo/redo ; unary and binary operators ; clear a character, the buffer, a line or the entire stack ;
+        move expressions around within the stack ; various parenthesis.
 
     }
     Needs:   'view
@@ -60,13 +83,15 @@ Red [
 ; All code is isolated from the global context by putting it in a dedicated context
 recalculator: context [
 
+; Default font used for the display
+myfont-name: system/view/fonts/system ; "Segoe UI" on Windows 10
+
 ; Global context
-global: context? 'system
+global: system/words
 
 ; Debug for the whole recalculator
 ; there is a debug field for each component though to turn on/off various parts of the code
 debug: false
-
 
 ;; Reset some debug flags
 ;system/reactivity/debug?: off
@@ -77,6 +102,18 @@ debug: false
 
 ; unforce pretty display of float - not used anyway
 ;system/options/float/pretty?: true
+
+;
+; Some unique strings to be used as type ids
+;xoh7
+;sgcw
+;y5tt
+;g92n
+;yzrq
+;vnud
+;muu1
+;lbac
+;th7o
 
 ; Assert function used accross the code
 assert: function [
@@ -115,55 +152,58 @@ funcs: context [
     ; Special form
     ; @ZWT should be reviewed thoroughly
     ;
-    form: function [
+    format: function [
         "Form string a value (float or integer) in an attempt to mix the standard form and standard probe."
         value [float! integer! none!] ; none! if no value computed
         return: [string!]
     ][
         res: none
-        res: case [
-            integer! == type? value [ global/form value ] ; delegate to standard form
-            none? value [ "Invalid" ] ; clarify none? vs NaN - @ZWT TODO
-            NaN? value [ "Invalid" ] ; beware that value = 1.#NaN never matches even with 1.#NaN - therefore NaN?
-            value = 1.#INF [ "Positive Overflow" ]
-            value = -1.#INF [ "Negative Overflow" ]
-            value = 0 [ "0" ] ; no 0.0
-            ( (global/absolute value) < float-epsilon ) [ global/mold value ] ; otherwise 0.0 if tiny number
-            true [ 
-                res: global/form value
-                ; cleanup trailing ".0" if any
-                if all [ 
-                    not find res #"e"
-                    ( back back tail res ) = ".0"
-                ][
-                    take/part/last res 2
+        ; @ZWT do block otherwise compiled code fails
+        do [
+            res: case [
+                integer! == type? value [ form value ] ; delegate to standard form
+                none? value [ "Invalid" ] ; clarify none? vs NaN - @ZWT TODO
+                NaN? value [ "Invalid" ] ; beware that value = 1.#NaN never matches even with 1.#NaN - therefore NaN?
+                value = 1.#INF [ "Positive Overflow" ]
+                value = -1.#INF [ "Negative Overflow" ]
+                value = 0 [ "0" ] ; no 0.0
+                ( (absolute value) < float-epsilon ) [ mold value ] ; otherwise 0.0 if tiny number
+                true [
+                    res: form value
+                    ; cleanup trailing ".0" if any
+                    if all [
+                        not find res #"e"
+                        ( back back tail res ) = ".0"
+                    ][
+                        take/part/last res 2
+                    ]
+                    res
                 ]
-                res
             ]
-        ]
-        ; add a separator for thousands
-        either none? res [
-            res: copy ""
-            if debug [
-                print [ "Unexpected form string none for value" mold value ]
-            ]
-        ][
-            s: res
-            while [ all [ not tail? s #"0" <= s/1 s/1 <= #"9" ] ][ s: next s ] ; forward across leading digits
-            i: 0
-            until [ ; backwards inserting a separator every three digits
-                s: back s
-                i: ( mod i 3 ) + 1
-                if i = 3 [
-                    insert s #" "
+            ; add a separator for thousands
+            either none? res [
+                res: copy ""
+                if debug [
+                    print [ "Unexpected form string none for value" mold value ]
                 ]
-                s == res
-            ]
-            if res/1 == #" " [
-                take res
-            ]
-            if debug [
-                print [ "Value:" mold value "output:" res ]
+            ][
+                s: res
+                while [ all [ not tail? s #"0" <= s/1 s/1 <= #"9" ] ][ s: next s ] ; forward across leading digits
+                i: 0
+                until [ ; backwards inserting a separator every three digits
+                    s: back s
+                    i: ( mod i 3 ) + 1
+                    if i = 3 [
+                        insert s #" "
+                    ]
+                    s == res
+                ]
+                if res/1 == #" " [
+                    take res
+                ]
+                if debug [
+                    print [ "Value:" mold value "output:" res ]
+                ]
             ]
         ]
         return res
@@ -174,9 +214,12 @@ funcs: context [
     ;
     exps: function [
         value1 [number!]
-        value2 [integer!]
+        value2 [number!]
         return: [number!]
     ][
+        if not integer? value2 [
+            return 1.#NaN
+        ]
         return value1 * ( 10 ** value2 )
     ]
 
@@ -187,18 +230,18 @@ funcs: context [
         return 1 / value
     ]
 
-    negate: function [
+    opposite: function [
         value [number!]
         return: [float!]
     ][
-        return global/negate value
+        negate value
     ]
 
-    absolute: function [
+    abs: function [
         value [number!]
         return: [float!]
     ][
-        return global/absolute value
+        absolute value
     ]
 
     factorial: function [
@@ -206,7 +249,7 @@ funcs: context [
         return: [number!]
     ][
         if value < 0 [ return 1.#NaN ] ; Expecting positive integer
-        if value = 0 [ return 0 ]
+        if value = 0 [ return 1 ]
         res: either value > 12 [1.0][1] ; 13! = 6 227 020 800 that extends max int = 2 147 483 647
         until [
             res: res * value
@@ -216,19 +259,27 @@ funcs: context [
         return res
     ]
 
-    ; @ZWT TODO : make it static so that the returned value is kept for the current expression
-    ; probably to be implemented at the expression level
-    random: function [
+    ; the map keeping all generated random values
+    rand-values: make map! []
+
+    ; returns a random value for the given max value and id
+    rand: function [
         value [number!]
+        id [integer!]       ; tag to ensure random value is always the same for the same function
         return: [number!]
     ][
-        return global/random value
+        k: rejoin [ "" id ":"  value ]
+        v: select rand-values k
+        if not v [
+            v: random value
+            put rand-values k v
+        ]
+        return v
     ]
 
     ;
     ; Binary operations
     ;
-
     add: function [
         v1 [number!]
         v2 [number!]
@@ -292,19 +343,19 @@ funcs: context [
         v2 [number!]
         return: [number!]
     ][
-        r: attempt [ global/mod v1 v2 ]
+        r: attempt [ mod v1 v2 ]
         if none? r [
             r: ( sign? v1 ) * 1.#NaN
         ]
         return r
     ]
 
-    remainder: function [
+    remain: function [
         v1 [number!]
         v2 [number!]
         return: [number!]
     ][
-        r: attempt [ global/remainder v1 v2 ]
+        r: attempt [ remainder v1 v2 ]
         if none? r [
             r: ( sign? v1 ) * 1.#NaN
         ]
@@ -319,85 +370,85 @@ funcs: context [
         value [number!]
         return: [number!]
     ][
-        return global/power value 2
+        return power value 2
     ]
 
     square-2: function [
         value [number!]
         return: [number!]
     ][
-        return global/sqrt value
+        return sqrt value
     ]
 
     power-3: function [
         value [number!]
         return: [number!]
     ][
-        return global/power value 3
+        return power value 3
     ]
 
     square-3: function [
         value [number!]
         return: [number!]
     ][
-        return global/power value ( 1 / 3 )
+        return power value ( 1 / 3 )
     ]
 
-    power: function [
+    pow: function [
         value [number!]
-        exp [integer!]
+        ex [integer!]
         return: [number!]
     ][
-        return global/power value exp
+        return power value ex
     ]
 
     square: function [
         value [number!]
-        exp [integer!]
+        ex [integer!]
         return: [number!]
     ][
-        return global/power value ( 1 / exp )
+        return power value ( 1 / ex )
     ]
 
     ;
     ; Trigonometric constant and functions
     ;
 
-    PI: global/PI
+    PI-VAL: PI
 
-    sine: function [
+    sinus: function [
         value [number!]
         mode [word!]
         return: [number!]
     ][
         return switch/default mode [
-            deg [ global/sine value ]
-            rad [ global/sine/radians value ]
-            grad [ global/sine ( value * 360 / 400 ) ]
+            deg [ sine value ]
+            rad [ sine/radians value ]
+            grad [ sine ( value * 360 / 400 ) ]
         ] [ none ]
     ]
 
-    cosine: function [
+    cosinus: function [
         value [number!]
         mode [word!]
         return: [number!] 
     ][
         return switch mode [
-            deg [ global/cosine value ]
-            rad [ global/cosine/radians value ]
-            grad [ global/cosine ( value * 360 / 400 ) ]
+            deg [ cosine value ]
+            rad [ cosine/radians value ]
+            grad [ cosine ( value * 360 / 400 ) ]
         ]
     ]
 
-    tangent: function [
+    tang: function [
         value [number!]
         mode [word!]
         return: [number!]
     ][
         return switch mode [
-            deg [ global/tangent value ]
-            rad [ global/tangent/radians value ]
-            grad [ global/tangent ( value * 360 / 400 ) ]
+            deg [ tangent value ]
+            rad [ tangent/radians value ]
+            grad [ tangent ( value * 360 / 400 ) ]
         ]
     ]
 
@@ -410,9 +461,9 @@ funcs: context [
             return 1.#NaN
         ]
         return switch mode [
-            deg [ global/arcsine value ]
-            rad [ global/arcsine/radians value ]
-            grad [ ( global/arcsine value ) * 400 / 360 ]
+            deg [ arcsine value ]
+            rad [ arcsine/radians value ]
+            grad [ ( arcsine value ) * 400 / 360 ]
         ]
     ]
 
@@ -425,9 +476,9 @@ funcs: context [
             return 1.#NaN
         ]
         return switch mode [
-            deg [ global/arccosine value ]
-            rad [ global/arccosine/radians value ]
-            grad [ ( global/arccosine value ) * 400 / 360 ]
+            deg [ arccosine value ]
+            rad [ arccosine/radians value ]
+            grad [ ( arccosine value ) * 400 / 360 ]
         ]
     ]
 
@@ -437,9 +488,9 @@ funcs: context [
         return: [number!]
     ][
         return switch mode [
-            deg [ global/arctangent value ]
-            rad [ global/arctangent/radians value ]
-            grad [ ( global/arctangent value ) * 400 / 360 ]
+            deg [ arctangent value ]
+            rad [ arctangent/radians value ]
+            grad [ ( arctangent value ) * 400 / 360 ]
         ]
     ]
 
@@ -448,7 +499,7 @@ funcs: context [
         mode [word!]
         return: [number!]
     ][
-        res: sine value mode
+        res: sinus value mode
         if ( res == 0 ) [
             return 1.#NaN
         ]
@@ -460,7 +511,7 @@ funcs: context [
         mode [word!]
         return: [number!]
     ][
-        res: cosine value mode
+        res: cosinus value mode
         if ( res == 0 ) [
             return 1.#NaN
         ]
@@ -472,11 +523,11 @@ funcs: context [
         mode [word!]
         return: [number!]
     ][
-        res: sine value mode
+        res: sinus value mode
         if ( res == 0 ) [
             return 1.#NaN
         ]
-        return ( cosine value mode ) / res
+        return ( cosinus value mode ) / res
     ]
 
     cosecant-1: function [
@@ -519,9 +570,9 @@ funcs: context [
     ; @ZWT : how about using macros ?
 
     ; radian variants
-    sine-r: function [v] [sine v 'rad]
-    cosine-r: function [v] [cosine v 'rad]
-    tangent-r: function [v] [tangent v 'rad]
+    sine-r: function [v] [sinus v 'rad]
+    cosine-r: function [v] [cosinus v 'rad]
+    tangent-r: function [v] [tang v 'rad]
     sine-1-r: function [v] [sine-1 v 'rad]
     cosine-1-r: function [v] [cosine-1 v 'rad]
     tangent-1-r: function [v] [tangent-1 v 'rad]
@@ -533,9 +584,9 @@ funcs: context [
     cotangent-1-r: function [v] [cotangent-1 v 'rad]
 
     ; deg variants
-    sine-d: function [v] [sine v 'deg]
-    cosine-d: function [v] [cosine v 'deg]
-    tangent-d: function [v] [tangent v 'deg]
+    sine-d: function [v] [sinus v 'deg]
+    cosine-d: function [v] [cosinus v 'deg]
+    tangent-d: function [v] [tang v 'deg]
     sine-1-d: function [v] [sine-1 v 'deg]
     cosine-1-d: function [v] [cosine-1 v 'deg]
     tangent-1-d: function [v] [tangent-1 v 'deg]
@@ -547,9 +598,9 @@ funcs: context [
     cotangent-1-d: function [v] [cotangent-1 v 'deg]
 
      ; gradient variants
-    sine-g: function [v] [sine v 'grad]
-    cosine-g: function [v] [cosine v 'grad]
-    tangent-g: function [v] [tangent v 'grad]
+    sine-g: function [v] [sinus v 'grad]
+    cosine-g: function [v] [cosinus v 'grad]
+    tangent-g: function [v] [tang v 'grad]
     sine-1-g: function [v] [sine-1 v 'grad]
     cosine-1-g: function [v] [cosine-1 v 'grad]
     tangent-1-g: function [v] [tangent-1 v 'grad]
@@ -564,73 +615,73 @@ funcs: context [
     ; Logarithm functions
     ;
 
-    E: global/exp 1
+    E-VAL: do [ exp 1 ] ; do there to make sure it is properly evaluated by the compiler (otherwise silently dropped)
 
-    log-e: function [
+    logarithm-e: function [
         value [number!]
         return: [number!]
     ][
-        return global/log-e value
+        return log-e value
     ]
 
-    log-2: function [
+    logarithm-2: function [
         value [number!]
         return: [number!]
     ][
-        return global/log-2 value
+        return log-2 value
     ]
 
-    log-10: function [
+    logarithm-10: function [
         value [number!]
         return: [number!]
     ][
-        return global/log-10 value
+        return log-10 value
     ]
 
     exp-e: function [
         value [number!]
         return: [number!]
     ][
-        return global/exp value
+        return exp value
     ]
 
     exp-2: function [
         value [number!]
         return: [number!]
     ][
-        return global/power 2 value
+        return power 2 value
     ]
 
     exp-10: function [
         value [number!]
         return: [number!]
     ][
-        return global/power 10 value
+        return power 10 value
     ]
 
     ;
     ; round functions
     ;
 
-    round: function [
+    rounding: function [
         value [number!]
         return: [integer!]
     ][
-        return global/round value
+        return round value
     ]
 
-    ceil: function [
+    ceiling: function [
         value [number!]
         return: [integer!]
     ][
-        return global/round/ceiling value
+        return round/ceiling value
     ]
 
-    floor: function [
+    flooring: function [
         value [number!]
         return: [integer!]
     ][
-        return global/round/floor value
+        return round/floor value
     ]
 
     ;
@@ -642,7 +693,7 @@ funcs: context [
         x [number!]
         return: [number!]
     ][
-        return ( ( global/exp x ) - ( global/exp ( 0 - x ) ) ) / 2
+        return ( ( exp x ) - ( exp ( 0 - x ) ) ) / 2
     ]
 
     cosh: function [
@@ -650,7 +701,7 @@ funcs: context [
         x [number!]
         return: [number!]
     ][
-        return ( ( global/exp x ) + ( global/exp ( 0 - x ) ) ) / 2
+        return ( ( exp x ) + ( exp ( 0 - x ) ) ) / 2
     ]
 
     tanh: function [
@@ -690,8 +741,8 @@ funcs: context [
         x [number!]
         return: [number!]
     ][
-        return global/log-e (
-            x + global/sqrt ( ( x ** 2 ) + 1 )
+        return log-e (
+            x + sqrt ( ( x ** 2 ) + 1 )
         )
     ]
 
@@ -700,8 +751,8 @@ funcs: context [
         x [number!]
         return: [number!]
     ][
-        return global/log-e (
-            x + global/sqrt ( ( x ** 2 ) - 1 )
+        return log-e (
+            x + sqrt ( ( x ** 2 ) - 1 )
         )
     ]
 
@@ -710,7 +761,7 @@ funcs: context [
         x [number!]
         return: [number!]
     ][
-        return ( 1 / 2 ) * global/log-e (
+        return ( 1 / 2 ) * log-e (
             ( 1 + x ) / ( 1 - x )
         )
     ]
@@ -720,10 +771,10 @@ funcs: context [
         x [number!]
         return: [number!]
     ][
-        return global/log-e (
+        return log-e (
             ( 1 / x )
             +
-            global/sqrt (
+            sqrt (
                 ( 1 / ( x ** 2 ) )
                 +
                 1
@@ -736,8 +787,8 @@ funcs: context [
         x [number!]
         return: [number!]
     ][
-        return global/log-e (
-            ( 1 + global/sqrt ( 1 - ( x ** 2 ) ) )
+        return log-e (
+            ( 1 + sqrt ( 1 - ( x ** 2 ) ) )
             /
             x
         )
@@ -748,7 +799,7 @@ funcs: context [
         x [number!]
         return: [number!]
     ][
-        return ( 1 / 2 ) * global/log-e (
+        return ( 1 / 2 ) * log-e (
             ( x + 1 ) / ( x - 1 )
         )
     ]
@@ -761,9 +812,9 @@ funcs: context [
         value [number!]
         return: [number!]
     ][
-        vd: global/round/down value
+        vd: round/down value
         value-m: ( value - vd ) * 60
-        vm: global/round/down value-m
+        vm: round/down value-m
         value-s: ( value-m - vm ) * 60 
         return vd + ( vm / 100 ) + ( value-s / 10000 )
     ]
@@ -773,8 +824,8 @@ funcs: context [
         value [number!]
         return: [number!]
     ][
-        vd: global/round/down value
-        vm: global/round/down ( ( value - vd ) * 100 )
+        vd: round/down value
+        vm: round/down ( ( value - vd ) * 100 )
         vs: ( value - vd - ( vm / 100 ) ) * 10000
         return vd + ( vm / 60 ) + ( vs / 3600 )
     ]
@@ -814,7 +865,7 @@ funcs: context [
         ]
         dd: dt2 - dt1
         probe dd
-        dw: global/round/floor ( dd / 7 )
+        dw: round/floor ( dd / 7 )
         dd: dd - ( 7 * dw )
         probe reduce [ ddd dy dm dw dd ]
     ]
@@ -863,7 +914,7 @@ keys: #(
     sfe-spacer: [sfe-spacer literal "⦅←)" "⦅←)" "⦅←)"]
 
     ; decimal separator
-    decimal-separator: [decimal-separator literal "," "," ""]
+    decimal-separator: [decimal-separator literal "." "." ""]
 
     ; digits
     n0: [n0 literal "0" "0" ""]
@@ -878,8 +929,8 @@ keys: #(
     n9: [n9 literal "9" "9" ""]
 
     ; constants
-    E: [E constant "𝑒" "𝑒" "𝑒"]
-    PI: [PI constant "π" "π" "π"]
+    E-VAL: [E-VAL constant "𝑒" "𝑒" "𝑒"]
+    PI-VAL: [PI-VAL constant "π" "π" "π"]
 
     ;;
     ;; Binary operators and functions
@@ -893,14 +944,14 @@ keys: #(
     multiply: [multiply binary "×" "×" "×"]
     divide: [divide binary "÷" "÷" "÷"]
     modulo: [modulo binary "mod" "mod" "mod"]
-    remainder: [remainder binary "rem" "rem" "rem"]
+    remain: [remain binary "rem" "rem" "rem"]
 
     ; implicit multiplications (i.e. two terms following without an operator in between)
     implicit-multiply: [implicit-multiply binary "⋅" "⋅" "⋅"]
 
     ; powers
     exps: [exps binary "E" "[E]" "E"]
-    power: [power binary "𝑥ʸ" "↑" "↑"]
+    pow: [pow binary "𝑥ʸ" "↑" "↑"]
     square: [square binary "ʸ√𝑥" "↑/" "↑/"]
 
     ;;
@@ -909,23 +960,20 @@ keys: #(
 
     ; unary rounding operations
     ; also works as separator
-    absolute: [absolute unary "|𝑥|" "|x|" "|" "|"]
-    absolute?: [absolute? literal "?" "[absolute?]" "?" ""] ; ambiguous absolute delimiter resolved in spacer
-    round: [round unary "[𝑥]" "[x]" "[" "]"]
-    ceil: [ceil unary "⎡x⎤" "⎡x⎤" "⎡" "⎤"] ; ⌈x⌉
-    floor: [floor unary "⎣x⎦" "⎣x⎦" "⎣" "⎦"] ; ⌊x⌋
+    abs: [abs unary "|𝑥|" "|x|" "|" "|"]
+    abs?: [abs? literal "?" "[abs?]" "?" ""] ; ambiguous absolute delimiter resolved in spacer
+    rounding: [rounding unary "[𝑥]" "[x]" "[" "]"]
+    ceiling: [ceiling unary "⎡x⎤" "⎡x⎤" "⎡" "⎤"] ; ⌈x⌉
+    flooring: [flooring unary "⎣x⎦" "⎣x⎦" "⎣" "⎦"] ; ⌊x⌋
 
     ; unary operations
     factorial: [factorial unary "n!" "[n!]" "" "!"]
-    negate: [negate unary "-𝑥" "[-]" "-" ""] ; hyphen -
+    opposite: [opposite unary "-𝑥" "[-]" "-" ""] ; hyphen -
     inverse: [inverse unary "¹∕𝑥" "⁽⁻¹⁾" "" "⁻¹"]
     pourcent: [pourcent unary "%" "[%]" "" "%"]
 
-    ; @ZWT - special unary operation - random
-    ; its value changes at each re-evaluation.
-    ; as expression are rebuilt all the time currently, expressions
-    ; that use random also change of values all the time.
-    random: [random unary "rand" "[rand]" "rand" ""]
+    ; random value
+    rand: [rand unary "rand" "[rand]" "rand" ""]
 
     ; unary power functions
     power-2: [power-2 unary "𝑥²" "⁽²⁾" "" "²"]
@@ -994,9 +1042,9 @@ keys: #(
     coth-1: [coth-1 unary "cotₕ⁻¹" "[cotₕ⁻¹]" "cotₕ⁻¹" ""]
 
     ; log / exp
-    log-2: [log-2 unary "log₂" "[log₂]" "log₂" ""]
-    log-e: [log-e unary "logₑ" "[logₑ]" "logₑ" ""]
-    log-10: [log-10 unary "log₁₀" "[log₁₀]" "log₁₀" ""]
+    logarithm-2: [logarithm-2 unary "log₂" "[log₂]" "log₂" ""]
+    logarithm-e: [logarithm-e unary "logₑ" "[logₑ]" "logₑ" ""]
+    logarithm-10: [logarithm-10 unary "log₁₀" "[log₁₀]" "log₁₀" ""]
     exp-2: [exp-2 unary "2ˣ" "[2ˣ]" "2↑" ""] ; @ZWT ambiguous but here with no space
     exp-e: [exp-e unary "𝑒ˣ" "[𝑒ˣ]" "𝑒↑" ""] ; @ZWT ambiguous but here with no space
     exp-10: [exp-10 unary "10ˣ" "[10ˣ]" "10↑" ""] ; @ZWT ambiguous but here with no space
@@ -1010,11 +1058,27 @@ keys: #(
     redo: [redo control "↷" "" ""]
     clear-expr: [clear-expr control "≪" "" ""]
     clear-all: [clear-all control "⋘" "" ""] 
-    back-space: [back-space control "<" "" ""]
+    backspace: [backspace control "<" "" ""]
     enter: [enter control "⮠" "" ""]
     degree: [degree control "Deg…" "" "" ""]
     radian: [radian control "Rad…" "" "" ""]
     gradient: [gradient control "Grad…" "" "" ""]
+    swap-expr: [swap-expr control "⇵" "" ""]
+    move-expr: [move-expr control "↰" "" ""]
+    roll-clockwise: [roll-clockwise control "↱↲" "" ""]
+    roll-anticlockwise: [roll-anticlockwise control "↳↰" "" ""]
+    down-expr: [down-expr control "↓" "" ""]
+    up-expr: [up-expr control "↑" "" ""]
+    down-sel: [down-sel control "⇣" "" ""]
+    up-sel: [up-sel control "⇡" "" ""]
+    no-sel: [no-sel control "⮾" "" "" ]
+    pull-expr: [pull-expr control "↡" "" ""]
+    push-expr: [push-expr control "↟" "" ""]
+    dup-expr: [dup-expr control "②" "" ""]
+
+    ; options
+    stack-up: [stack-up control "Up" "" ""]
+    stack-down: [stack-down control "Down" "" ""]
 )
 ; keys
 ;]
@@ -1033,7 +1097,6 @@ keys: #(
 ; or indirectly )
 ;----------------------------------------------------------------------------
 ;comment [
-; this one requires encap -e
 tree: context [
 
     ; having a field debug per context is a simple means of turning on/off debugging 
@@ -1045,25 +1108,30 @@ tree: context [
 
     ;
     ; Prototype objects at its core - no objects at all but blocks with named slots !
+    ; Here a do block is used to force the evaluation of the assignations, otherwise the compiler silently
+    ; ignore them and nothing works
     ;
-    node0: compose [
-        node-type: node0
-        label: (none)
-        value: (none)
-        extra: (none)
-        parent: (none)
+    node0: node1: node2: none
+    do [
+        node0: compose [
+            node-type: node0
+            label: (none)
+            value: (none)
+            extra: (none)
+            parent: (none)
+        ]
+        node1: compose [
+            (node0)
+            child (none)
+        ]
+        node1/node-type: 'node1
+        node2: compose [
+            (node0)
+            left: (none)
+            right (none)
+        ]
+        node2/node-type: 'node2
     ]
-    node1: compose [
-        (node0)
-        child: (none)
-    ] 
-    node1/node-type: 'node1
-    node2: compose [
-        (node0)
-        left: (none)
-        right: (none)
-    ]
-    node2/node-type: 'node2
 
     ; The factory of nodes
     create: function [
@@ -1360,7 +1428,7 @@ tree: context [
         assert (node? node) "as-string - expecting node value"
         buf: make string! 10
         append buf node/label
-        if not none? node/value [
+        if node/value [
             append buf ":"
             append buf to-string node/value
         ]
@@ -1372,10 +1440,11 @@ tree: context [
     ; any code bound against this context will use it. So it should implement the same interface
     ; (and capabilities) as the probe that lies in the global context. If you merely want to provide
     ; a probe-like feature for this particular object and context, better have it named differently 
-    ; so as to avoid any conflicts. A feature of the language could be the ability to distinguish
-    ; between the internals of an object or contrext from its interface. Distinguish between the probe
-    ; used internally that would be bound regularly against the global context, from the probe defined
-    ; in the object itself that may be referred by others. }
+    ; so as to avoid any conflicts.
+    ; A feature of the language could be the ability to distinguish between the internals of an object
+    ; or context from its interface. Distinguish between the probe used internally that would be bound
+    ; regularly against the global context, from the probe defined as a slot of the object that may
+    ; be referred by others.
     myprobe: function [
         "Prints out the node"
         node [any-type!]
@@ -1467,7 +1536,7 @@ tree: context [
                 ][
                     k: select keys node/label
                     append buf either block? k [ k/5 ] [ node/label ]
-                    if not none? node/value [
+                    if node/value [
                         append buf ":"
                         append buf to-string node/value
                     ]
@@ -1489,7 +1558,7 @@ tree: context [
                     append buf k/6
                 ][
                     append buf node/label
-                    if not none? node/value [
+                    if node/value [
                         append buf ":"
                         append buf to-string node/value
                     ]
@@ -1508,7 +1577,7 @@ tree: context [
                 ][
                     append buf node/label
                 ]
-                if not none? node/value [
+                if node/value [
                     append buf ":"
                     append buf to-string node/value
                 ]
@@ -1585,25 +1654,33 @@ tree: context [
             ]
         ]
         ; evaluate the resulting command if any
-        return case [
+        case [
             res [
                 if debug [ 
-                    print [ "Returns value" res "for node:" tree/as-string node ]
+                    print [ "Returns value:" res "for node:" tree/as-string node ]
                 ]
-                res
             ]
             cmd [
-                if debug [ 
-                    print [ "About to execute" cmd "for node:" tree/as-string node ]
+                set/any 'res try [ do cmd ]
+                if all [ :res error? res ] [
+                    if debug [
+                        print [ "Executed:" mold cmd "for node:" tree/as-string node "and got an error:" mold res ]
+                    ]
+                    do res ; re-throw
                 ]
-                res: do cmd
+                if unset? :res [
+                    res: none
+                ]
+                if debug [
+                    print [ "Executed:" mold cmd "for node:" tree/as-string node "and got:" mold res ]
+                ]
             ]
             true [
                 do make error! rejoin [ "Impossible to compute node:" tree/as-string node ]
             ]
         ]
+        res
     ]
-
 ]
 ;tree
 ;]
@@ -1614,30 +1691,23 @@ tree: context [
 
 ; A stack is used during the parsing for collecting the values (in lieu of collect/keep).
 ; Should not be necessary, however collect/keep does not cleanup values in case of backtrack
-; and my poor grammar require such backtracking. Therefore I do it by hand.
+; and my poor grammar require such backtracking. Therefore I do this by hand.
 ;comment [
 stack: context [
 
-    type: 'stack
+    type: 'a-stack
 
     ; the underlying container that is a regular serie
-    s: copy []
+    s: none
 
-    ; clone self
-    clone: function [ return: [object!] ][
-        t: make self []
-        t/s: copy []
-        return t
-    ]
-
-    ; init
+    ; init, re-init oneself
     init: function [][
-        clear self/s
+        self/s: copy []
     ]
 
     ; Avoid using the "same" words as in the global context otherwise infinite loop.
     ; The language would benefit an outer or super keyword to access the enclosing context
-    is-empty: function [
+    is-empty?: function [
         "Empty ?"
         return: [logic!]
     ][
@@ -1815,62 +1885,194 @@ stack: context [
 ;stack
 ;]
 
+; Expr-core : data object holding the data and status of an expression
+; It is a pretty dumb object, only used to pass data around.
+;
+; Red is not an oop language, and its compiler does not handle well the objects
+; when they are moved around (i.e. for instance the object type is lost when 
+; it is retrieved from a function. That prevents using factory like patterns).
+; Also objects that are copied also copy their functions which is a bit weird
+; unless you want real prototypes and even so you would expect duplicating the codde
+; only for those functions that are different. In that sense, objects in Red are more
+; like regular contexts : a place holder for data.
+;
+expr-core: object [
+    uh34: none          ; unique id for this type
+    status: none
+    source: copy []     ; source either a block of keys or a string!
+    failed: none        ; index on source for the first non processed key or character
+    tokens: copy []     ; tokens produced
+    node: none          ; computed node tree
+]
+
 ;----------------------------------------------------------------------------
-; Expr model core (for lexer, spacer, syntaxer)
+; calc-core - acting as a model for the lexer, spacer, and syntaxer
 ;----------------------------------------------------------------------------
-model-core: context [
+;
+;comment [
+calc-core: context [
 
-    expr: object [
+    ; test if a given value is an expression
+    expr?: function [
+        "True if the value passed is an expression"
+        ex [any-type!] 
+        return: [logic!] 
+    ][
+        ; for checking the object type, test the existence of a particular word
+        ; that technique allows having sub-types, using their own particular words
+        ; instead of having a single type slot and using possibly a serie to aggregate multiple
+        ; types
+        all [ object? ex in ex 'uh34 true ] 
+    ]
 
-        uh34: none ; unique id for the type
+    ; Default expression
+    a-expr: make expr-core []
 
-        status: none
-        source: none        ; source either a block of keys or a string!
-        failed: none        ; index on source for the first non processed key or character
-        tokens: copy []     ; tokens produced
-        node: none          ; computed node tree
+    ; Return ex value or default expression
+    _get-expr: function [ ex [object! none!] ][
+        either ex [
+            assert ( in  ex 'uh34 ) "expecting an expr object for the  ex argument"
+        ][
+            ex: a-expr
+        ]
+        ex
+    ]
 
-        ; some debug string
-        source-as-string: function [return: [string!]] [ expr-source-as-string self ]
-        failed-as-string: function [return: [string!]] [ expr-failed-as-string self ]
-        node-as-string: function [return: [string!]] [ expr-node-as-string self ]
-        tokens-as-string: function [return: [string! ]] [ expr-tokens-as-string self ]
+    ; Returns default expression
+    get-expr: function [ return: [object!] ] [
+        return a-expr
+    ]
 
-        ; other functions directly implemented
-        empty?: function [return: [logic!]][ global/empty? source ]
-        failed?: function [return: [logic!]][ return not any [ none? failed tail? failed ] ]
-        last-key: function [return: [lit-word!]][ return last source ]
-        keys: function [return: [block!]][return source]
-        ;restore-all-keys: function [ex [object!] keys [block!]][source: keys]
-        valid?: function [return: [logic!]][ return not none? node ]
+    ; expr-init - when an expr object needs being created, that should be done
+    ; by calling make expr [], then by using this function to initialise its content
+    ; properly.
+    expr-init: function [ 
+        "Initialise an expression"
+        src [none! block! string! object!] "The source either none, a block of keys, a string, an existing expression"
+        /with ex [object! none!] "The expression to work on"
+    ][
+        ex: _get-expr ex
+        case [
+            none? src [                             ; initialisation with nothing
+                ex/status: none
+                ex/source: copy []
+                ex/failed: none
+                ex/tokens: copy []
+                ex/node: none
+            ]
+            any [ block? src string? src ] [        ; initialisation with a buffer of string or keys
+                ex/status: none
+                ex/source: copy src                 ; make it my own !
+                ex/failed: none
+                ex/tokens: copy []
+                ex/node: none
+            ]
+            all [ object? src in src 'uh34 ] [      ; copy from an existing expression
+                ex/status: src/status
+                ex/source: either none? src/source [ none ] [ copy src/source ]
+                ex/failed: either any [ none? src/source none? src/failed ] [ none ] [ at ex/source index? src/failed ]
+                ex/tokens: copy/deep src/tokens
+                ex/node: src/node                   ; node not entirely immutable (i.e. variable but should not be a problem)
+            ]
+            true [
+                do make error! "Expecting none! block! string! or object!"
+            ]
+        ]
+        exit ; not even the temptation to return ex
+    ]
 
+    ;
+    ; True if empty? expression
+    expr-empty?: function [
+        "True if the expression is empty"
+        /with ex [object!] "The expression to check"
+        return: [logic!]
+    ][
+        ex: _get-expr ex
+        empty? ex/source
+    ]
+
+    ; True if failed tokens
+    expr-failed?: function [ 
+        "True if the expression has failed keys"
+        /with ex [object!] "The expression to check"
+        return: [logic!]
+    ][
+        ex: _get-expr ex
+        all [ ex/failed not tail? ex/failed ]
+    ]
+
+    ; First failed token
+    expr-first-failed: function [
+        "Returns the first failed key or none"
+        /with ex [object!] "The expression to check"
+        return: [lit-word!]
+    ][
+        ex: _get-expr ex
+        either ex/failed [ ex/failed/1 ] [ none ]
+    ]
+
+    ; Last key
+    expr-last-key: function [
+        "Return the last key value or none"
+        /with ex [object!] "The expression"
+        return: [lit-word!]
+    ][
+        ex: _get-expr ex
+        last ex/source
+    ]
+
+    ; Keys 
+    expr-keys: function [
+        "Return all keys"
+        /with ex [object!] "The expression"
+        return: [series!] 
+    ][
+        ex: _get-expr ex
+        ex/source
+    ]
+
+    ; Valid? 
+    expr-valid?: function [
+        "True if valid expression"
+        /with ex [object!] "The expression"
+        return: [logic!]
+    ][
+        ex: _get-expr ex
+        return ex/node
     ]
 
     ; Outputs a token buffer for debug
     expr-tokens-as-string: function [
         "Turn a token list into a string"
-        ex [object!]
+        /with ex [object!] "The expression"
         return: [string!]
     ][
-        assert ( in ex 'uh34 ) "Expects an expr object"
-        tokens: ex/tokens
+        ex: _get-expr ex
         buf: copy ""
-        foreach t tokens [
-            switch/default t/1 [
-                'value [ append buf ( mold t/4 ) ]
-                'var [
-                    append buf keys/var/4
+        foreach t ex/tokens [
+            case [
+                t/1 = 'value [ append buf ( mold t/4 ) ]
+                t/1 = 'var [
+                    k: select keys 'var
+                    append buf k/4
                     append buf ( mold t/4 ) ; var number
                 ]
-                'spacer [
+                t/1 = 'spacer [
                     k: select keys t/4
                     append buf ( either k [k/4]["?"] )
                     append buf ( int-as-subscript t/5 ) ; repetition
                 ]
-            ][
-                ; other case const, unary, binary, paren => key value
-                k: select keys t/4
-                append buf ( either k [ k/4 ] ["?" ] )
+                all [ t/1 = 'unary t/4 = 'rand ] [
+                    k: select keys t/4
+                    append buf ( either k [k/4]["?"] )
+                    append buf ( int-as-subscript t/5 ) ; id
+                ]
+                true [
+                    ; other case const, unary, binary, paren => key value
+                    k: select keys t/4
+                    append buf ( either k [ k/4 ] ["?" ] )
+                ]
             ]
         ]
         buf
@@ -1897,7 +2099,7 @@ model-core: context [
     ]
 
     ; helper function - outputs a buffer of keys
-    keys-as-string: function [
+    key-buffer-as-string: function [
         "Returns a key stream as a string to be displayed"
         buffer [block!]
         return: [string!]
@@ -1915,12 +2117,19 @@ model-core: context [
             keep (
                 nb: offset? s e
                 t: s/1
-                rejoin [keys/(t)/4 (either nb == 1 [""][ int-as-subscript nb]) ]
+                k: select keys t
+                if k [
+                    rejoin ["" k/4 (either nb == 1 [""][ int-as-subscript nb]) ]
+                ]
             )
         ]
         key: [
-            copy w lit-word! keep ( 
-                either k: select keys (w/1) [ k/4 ] [ "?" ]
+            copy w any-word! keep (
+                case [
+                    k: select keys (w/1) [ k/4 ]
+                    find/match to-string w/1 "rand" ["rand"] ; if random, tag is following rand-1, rand-2 etc.
+                    true ["?"]
+                ]
             )
         ]
         rule: [ collect into res [ any [ spacer | key ] ] ]
@@ -1932,22 +2141,22 @@ model-core: context [
     ; helper function - outputs a buffer of keys
     expr-keys-as-string: function [
         "Returns a key stream as a string to be displayed"
-        ex [object!]
+        /with ex [object!] "The expression"
         return: [string!]
     ][
-        assert ( in ex 'uh34 ) "Expects an expr object"
+        ex: _get-expr ex
         buffer: ex/source
         if any [ not buffer empty? buffer ] [ return copy ""]
-        if string! == type? buffer [ return buffer ]
-        return keys-as-string buffer
+        if string? buffer [ return buffer ]
+        return key-buffer-as-string buffer
     ]
 
     ; well formed string of the computed node
     expr-node-as-string: function [
-        ex [object!]
+        /with ex [object!] "The expression"
         return: [string!] ; the well formed expression for final display
     ][
-        assert ( in ex 'uh34 ) "Expects an expr object"
+        ex: _get-expr ex
         either none? ex/node [
             copy ""
         ][
@@ -1957,29 +2166,58 @@ model-core: context [
 
    ; nice string output for the source
     expr-source-as-string: function [
-        ex [object!]
+        /with ex [object!] "The expression"
         return: [string!] ; the symbol list
     ][
-        assert ( in ex 'uh34 ) "Expects an expr object"
-        switch/default type? ex/source [ 
-            #[block!] [ keys-as-string ex/source ]
-            #[string!] [ ex/source ]
+        ex: _get-expr ex
+        switch/default type?/word ex/source [ ; use type?/word to get a word value and avoid using literal type #[string!] or #[block!]
+            block! [ key-buffer-as-string ex/source ]
+            string! [ ex/source ]
         ] [ copy "" ]
+    ]
+    expr-as-string: function [/with ex [object!] return: [string!]][
+        ex: _get-expr ex
+        expr-source-as-string/with ex
     ]
 
     ; failed symbols as string - used for displaying in the recalculator beneath the result
     expr-failed-as-string: function [
-        ex [object!]
+        /with ex [object!] "The expression"
         return: [string!]
     ][
-        assert ( in ex 'uh34 ) "Expects an expr object"
-        switch/default type? ex/failed [ 
-            #[block!] [ keys-as-string ex/failed ]
-            #[string!] [ ex/failed ]
+        ex: _get-expr ex
+        switch/default type?/word ex/failed [ 
+            block! [ key-buffer-as-string ex/failed ]
+            string! [ ex/failed ]
         ] [ copy "" ]
     ]
 
+    ; expr as integer or none if not an integer
+    expr-as-integer: function [
+        /with ex [object!] return: [integer! none!]
+    ][
+        ex: _get-expr ex
+        str: expr-source-as-string/with ex
+        if empty? str [
+            return none
+        ]
+        i: 0
+        foreach c str [
+            if not all [
+                c >= #"0"
+                c <= #"9"
+            ][
+                i: none
+                break
+            ]
+            i: ( i * 10 ) + ( c - #"0" )
+        ]
+        i
+    ]
+
 ]
+;calc-core
+;]
 
 ;----------------------------------------------------------------------------
 ; Lexical analysis : analyse an input string or key buffer and produces 
@@ -1998,17 +2236,10 @@ lexer: context [
 
     run: function [
         "Run the lexer on the given expression"
-        target [object! block! string!] "Expression as an expr object, a string or a block containing the list of keys"
-        return: [object!] ; Returns an expr object after update of /status /source /tokens /failed
+        ex [object!] "Expression to work on"
+        return: [object!] ; Returns the expression after updating of /status /tokens /failed
     ][
-        ; inialise a place holder for the computation if not provided
-        ex: none
-        either object! == type? target [
-            ex: target
-        ][
-            ex: make model-core/expr []
-            ex/source: target
-        ]
+        assert ( in ex 'uh34 ) "Expecting an expr object for the ex argument"
 
         ; different rules are used according to the buffer type, either block! of keys (lit-word! values)
         ; or string to parse - could use compose instead of a get-word
@@ -2034,6 +2265,14 @@ lexer: context [
         return ex
     ]
 
+    ;; Returns an id that is used to mark each random function
+    ;; once marked the random function will always return the same value
+    max-random-id: 0
+    new-random-id: function [] [
+        self/max-random-id: max-random-id + 1
+        max-random-id
+    ]
+
     ;---------------------------------------------------------------------------------------
     ; Key oriented parsing rules - for string rules see below
     ;---------------------------------------------------------------------------------------
@@ -2049,7 +2288,7 @@ lexer: context [
     ;;     for 'spacer, either 'ets-spacer, 'efs-spacer, 'ste-spacer, 'sfe-spacer
     ;;     for 'var, the variable number
     ;;     for 'value, the value number
-    ;;     for 'constant, the constant word 'E, 'PI etc.
+    ;;     for 'constant, the constant word 'E-VAL, 'PI-VAL etc.
 
     ; Make sure the following words that are used in the parse rules resolve in words bound to
     ; the lexer object ! Otherwise they may spill out in the global context, which you may not want.
@@ -2057,7 +2296,7 @@ lexer: context [
     ; pop up from nowhere, that might be shared and modified without any warning.
     ; A context should catch everything that has not been declared as global. Like function does
     ; for its locals.
-    e: f: n: s: none
+    e: f: n: s: w: id: none
 
     ; last parsed key
     lst: none
@@ -2066,7 +2305,7 @@ lexer: context [
     ; pretty dumb rule in fact - maybe parse was not that useful here...
     token-keys: [
         lst:
-        any [ number-key | paren-key | binary-key | spacer-keys | variable-key | constant-key | unary-key ] 
+        any [ number-key | paren-key | binary-key | spacer-keys | variable-key | constant-key | unary-key | random-key ] 
         lst: ; a handy catch all strategy for failed inputs - just mark its end
     ]
 
@@ -2087,7 +2326,7 @@ lexer: context [
         f: function [][
             b: copy []
             foreach v values-of keys [
-                if 'unary == v/2 [
+                if all [ 'unary == v/2 'rand <> v/1 ] [ ; 'rand is a special case see below
                     append b to-lit-word v/1
                     append b '|
                 ]
@@ -2107,8 +2346,8 @@ lexer: context [
     ]
     op-binary: [ op-binary-add | op-binary-mult | op-binary-power ]
     op-binary-add: [ 'add | 'subtract ]
-    op-binary-mult: [ 'multiply | 'divide | 'modulo | 'remainder ]
-    op-binary-power: [ 'power | 'square | 'exps ]
+    op-binary-mult: [ 'multiply | 'divide | 'modulo | 'remain ]
+    op-binary-power: [ 'pow | 'square | 'exps ]
 
     ; parenthesis
     paren-key: [
@@ -2143,7 +2382,28 @@ lexer: context [
         s: constant e: 
         keep ( compose [ 'constant (index? s) (index? e) (s/1) ] )
     ]
-    constant: [ 'E | 'PI ]
+    constant: [ 'E-VAL | 'PI-VAL ]
+
+    ; random - special treatment
+    ; the first time a random key is processed, it is tagged with an id so as to make the random key unique
+    ; this id is further taken into account to make sure calling the random function will always
+    ; return the same value for the same argument (otherwise the random value would be regenerated each time
+    ; it is called).
+    random-key: [
+        ahead lit-word! if ( find/match to-string s/1 "rand" )
+        s: lit-word!
+        keep (
+            w: to-string s/1
+            w: at w ( 1 + length? "rand" )
+            either w/1 == #"-" [
+                id: to-integer at w 2
+            ][
+                id: new-random-id
+                s/1: to-lit-word rejoin [ "rand-" id ]
+            ]
+            compose [ 'unary (index? s) (1 + index? s) 'rand (id) ]
+        )
+    ]
 
     ; numbers
     number-key: [
@@ -2202,7 +2462,7 @@ lexer: context [
         lst: 
         any [
             operator-str | delim-op-left-str | delim-op-right-str | 
-            absolute-str | spacer-str | paren-str | var-str | number-str
+            absolute-str | spacer-str | paren-str | var-str | number-str | random-str
         ]
         lst:
     ]
@@ -2217,7 +2477,7 @@ lexer: context [
             foreach k values-of keys [
                 if all [
                     find [unary binary constant] k/2
-                    not find [absolute round ceil floor] k/1 ; specific rule
+                    not find [abs abs? rounding ceiling flooring rand] k/1 ; specific rules
                 ][
                     m: either k/5 <> "" [k/5][k/6] ; string value left or right
                     if m == "" [
@@ -2252,11 +2512,11 @@ lexer: context [
     ; desambiguiation in spacer-handler phase
     absolute-str: [
         s: "|" e:
-        keep ( compose ['paren (index? s) (index? e) 'absolute? ] )
+        keep ( compose ['paren (index? s) (index? e) 'abs? ] )
     ]
 
     ; special case of unary operators that also work as delimiters like parenthesis
-    ; this is the case of round, ceiling, floor
+    ; this is the case of rounding, ceiling, floor
     ; this is handled by producing a unary operator token and paren tokens
     ; it cannot distinguish however between parenthesis. If these are well balanced 
     ; it is not an issue, if they are not it may pick a parenthesis that is not the one intended.
@@ -2265,9 +2525,9 @@ lexer: context [
             b: compose/deep [
                 s: 
                 [ 
-                    (keys/round/5) ( to-paren [ t: 'round ] )
-                    | (keys/ceil/5) ( to-paren [ t: 'ceil ] )
-                    | (keys/floor/5) ( to-paren [ t: 'floor ] )
+                    (keys/rounding/5) ( to-paren [ t: 'rounding ] )
+                    | (keys/ceiling/5) ( to-paren [ t: 'ceiling ] )
+                    | (keys/flooring/5) ( to-paren [ t: 'flooring ] )
                 ]
                 e:
             ]
@@ -2285,9 +2545,9 @@ lexer: context [
             b: compose/deep [
                 s:
                 [
-                    (keys/round/6)
-                    | (keys/ceil/6)
-                    | (keys/floor/6)
+                    (keys/rounding/6)
+                    | (keys/ceiling/6)
+                    | (keys/flooring/6)
                 ]
                 e:
             ]
@@ -2298,6 +2558,26 @@ lexer: context [
             b
         ]
         f
+    ]
+
+    ; special case of random function 
+    random-str: [
+        s: "rand" t: any subscript-digit-str e:
+        keep (
+            ; retrieve possible id or generate a new one
+            either t <> e [
+                t: copy/part t ( ( index? e ) - ( index? t ) )
+                id: subscript-as-int t
+            ][
+                ; if new one - add it ot the source string
+                id: new-random-id
+                t: int-as-subscript id
+                e: insert e t
+            ]
+            compose [ 'unary (index? s) (index? e) 'rand (id) ]
+        )
+        ; position itself again at e, if input string was modified
+        :e
     ]
 
     ; example of pure static rule
@@ -2331,6 +2611,8 @@ lexer: context [
         ]
         f
     ]
+
+    int-as-subscript: :calc-core/int-as-subscript
 
     ; Convert a subscript string into an integer value
     subscript-as-int: function [
@@ -2495,8 +2777,6 @@ spacer: context [
 
     type: 'spacer
 
-    stack: none
-
     ; Handle spacers
     ; same interface is used as for the lexer and syntaxer, taking an expression
     ; object and returning it back once modified
@@ -2505,17 +2785,13 @@ spacer: context [
         ex [object!] "Expression with the token stream produced by the lexical analysis"
         return: [object!] ; returns the expression after modifying /status /tokens /discarded
     ][
+        assert ( in ex 'uh34 ) "Expecting an expr object for the ex argument"
+
         source: ex/source
         tokens: ex/tokens
         status: failed: none
 
-        ; creates the stack if first run
-        ; here recalculator/stack is used to distinguish the object prototype from the local instance
-        ; another situation where super as a keyword might be useful
-        if none? self/stack [ self/stack: recalculator/stack/clone ]
-        stack/init
-
-        ; make sure there is at least one spacer or an absolute? to handle
+        ; make sure there is at least one spacer or an abs? to handle
         ; otherwise just pass along
         found?: false
         foreach tk tokens [
@@ -2525,7 +2801,7 @@ spacer: context [
                     break
                 ]
                 'paren [
-                    if tk/4 == to-lit-word 'absolute? [
+                    if tk/4 == to-lit-word 'abs? [
                         found?: true
                         break
                     ]
@@ -2540,7 +2816,7 @@ spacer: context [
         ][
 
             ; parse the stream of tokens to compute possible insertion points for parenthesis
-            ; doing so also identify positions of absolute? tokens
+            ; doing so also identify positions of abs? tokens
             self/lst: none
             status: parse tokens sp-root
 
@@ -2558,7 +2834,7 @@ spacer: context [
             ]
 
             ; if stack is void (analysis completly failed), nothing to work on - just leave
-            either stack/is-empty [
+            either stack/is-empty? [
                 if debug [
                     print ["Stack after parsing for spacers is void!"]
                 ]
@@ -2633,21 +2909,21 @@ spacer: context [
                                 ]
                             ]
                         ]
-                        ; also correct absolute? markes - see parse rule below sp-absolute?
+                        ; also correct abs? markes - see parse rule below sp-absolute?
                         absolute-l [
                             i: at tokens spc/1/p
-                            ; retarget absolute? as paren-l
+                            ; retarget abs? as paren-l
                             i/1/4: to-lit-word 'paren-l
-                            ; add just before new unary operator token for 'absolute
+                            ; add just before, a new unary operator token for 'abs
                             insert/only i compose [
                                 'unary
                                 (i/1/2) ; the next token start
                                 (i/1/2)
-                                'absolute
+                                'abs
                             ]
                         ]
                         absolute-r [
-                            ; retarget absolute? as paren-r
+                            ; retarget abs? as paren-r
                             i: at tokens spc/1/p
                             i/1/4: to-lit-word 'paren-r
                         ]
@@ -2677,12 +2953,12 @@ spacer: context [
         return ex
     ]
 
-    ;; take care of ambiguous absolute (absolute?) that may have been emitted by
+    ;; take care of ambiguous absolute (abs?) that may have been emitted by
     ;; the lexer when analyzing a string. The character | serves two purposes : 
     ;; it is marker for the operation and a delimiter either opening or closing for
     ;; the value or the subexpression on which to perform the operation;
-    ;; to resolve that, the buffer is scanned for the presence of absolute? and modify
-    ;; them as absolute - parent-l for an openin absolute? and parent-r for a closing absolute
+    ;; to resolve that, the buffer is scanned for the presence of abs? and modify
+    ;; them as abs - parent-l for an openin abs? and parent-r for a closing abs?
 
     _new-subexpression: function [
         "Helper function for creating new sub-expression markers to be added to the target buffer"
@@ -3057,7 +3333,7 @@ spacer: context [
     ; the opening absolute
     sp-absolute?: [
         pos: (stack/rule/enter 'sp-absolute? pos)
-        into [ 'paren skip skip 'absolute? thru end ]
+        into [ 'paren skip skip 'abs? thru end ]
         [
             (level: level + 1) ; increment parenthesis level
             (
@@ -3067,7 +3343,7 @@ spacer: context [
                 stack/push abs
             )
             sp-expr
-            p: into [ 'paren skip skip 'absolute? thru end ]
+            p: into [ 'paren skip skip 'abs? thru end ]
             (
                 abs: compose [
                     t: ('absolute-r) l: (level) p: (index? p)
@@ -3103,22 +3379,18 @@ syntaxer: context [
 
     type: 'syntaxer
 
-    stack: none
-
     ;; Runs
     run: function [
         "Performs the expression analysis"
         ex [object!] "The expression holding the source tokens to process"
         return: [object!] ; expression after modifying /status /tokens /discarded /node
     ][
+        assert ( in ex 'uh34 ) "Expecting an expr object for the ex argument"
+
         source: ex/source
         tokens: ex/tokens
         status: failed: node: none
-
-        ; creates the stack if need be
-        if none? self/stack [ self/stack: recalculator/stack/clone ]
-        stack/init
-
+        
         ; check tokens available
         either empty? tokens [
             if debug [ print [ "Syntaxer - no token to parse" ] ]
@@ -3143,7 +3415,7 @@ syntaxer: context [
 
             ; node is either none or stands at the top of the stack
             node: stack/pop
-            if debug and ( not stack/is-empty ) [
+            if debug and ( not stack/is-empty? ) [
                 ; should never happen
                 print "Stack has extra nodes..."
                 stack/myprobe
@@ -3177,11 +3449,10 @@ syntaxer: context [
     op-binary-add: lexer/op-binary-add
     op-binary-mult: lexer/op-binary-mult
     op-binary-power: lexer/op-binary-power
-    op-unary: lexer/op-unary
 
     ; Words used by the rules (make sure they are local to this context and do not spill out 
     ; anywhere else
-    s: x: y: op: none
+    s: x: y: op: id: none
 
     ; Last parsed token
     lst: none
@@ -3293,7 +3564,14 @@ syntaxer: context [
         any [
             ; infix unary operators
             op: into [ 'unary thru end ]
-            ( stack/push op/1/4 )
+            (
+                either op/1/4 = 'rand [ ; special case of 'rand
+                    stack/push op/1/5
+                    stack/push op/1/4
+                ][
+                    stack/push op/1/4 
+                ]
+            )
         ]
         value
         (
@@ -3301,14 +3579,25 @@ syntaxer: context [
             x: stack/pop
             while [ stack/top-1 <> 'sep ] [
                 op: stack/pop
-                x: tree/create/unary op x
+                either op = 'rand [ ; special case of rand
+                    id: stack/pop
+                    x: tree/create/unary/with op x id
+                ][
+                    x: tree/create/unary op x
+                ]
             ]
             stack/push x
         )
         any [
             ; postfix unary operators
             op: into [ 'unary thru end ]
-            ( x: stack/pop stack/push tree/create/unary op/1/4 x )
+            (
+                either op/1/4 = 'rand [ ; special case of 'rand
+                    x: stack/pop stack/push tree/create/unary/with op/1/4 x op/1/5
+                ][
+                    x: stack/pop stack/push tree/create/unary op/1/4 x
+                ]
+            )
         ]
         (stack/rule/keep) | (stack/rule/fail) fail
     ]
@@ -3356,153 +3645,156 @@ syntaxer: context [
 ;]
 
 ;--------------------------------------------------------------------------------
-; model object : a context for holding and manipulating mathematical expressions
+; expr object : extension of expr-core adding the capability of being computed and
+; stacked
 ;--------------------------------------------------------------------------------
 ;comment [
-model: make model-core [ ; extends model
+expr: make expr-core [
+
+    krnr: none
+
+    ; computed value or none
+    val: none
+
+    ; transient, used for detecting circular references
+    visited?: false
+
+    ; stack state
+    ; true - expression is stacked
+    ; false - expression is unstacked (either created or discarded)
+    stacked?: false
+
+    ; computation state
+    ; true - expression is computed
+    ; false - expression is not computable
+    ; none - computation state is unknown
+    computed?: none
+
+]
+;expr
+;]
+
+;--------------------------------------------------------------------------------
+; calc context : a context for holding and manipulating mathematical expressions
+;--------------------------------------------------------------------------------
+
+;comment [
+calc: make calc-core [ ; extends calc-core
 
     debug: false
 
-    expr: make model-core/expr [
+    a-expr: make expr []
 
-        krnr: none
-
-        ; computed value or none
-        val: none
-
-        ; transient, used for detecting circular references
-        visited?: false
-
-        ; stack state
-        ; true - expression is stacked
-        ; false - expression is unstacked (either created or discarded)
-        stacked?: false
-
-        ; computation state
-        ; true - expression is computed
-        ; false - expression is not computable
-        ; none - computation state is unknown
-        computed?: none
-
-        ; functions referring to the outer context and passing self as argument
-        equals: function [o [any-type!] return: [logic!]][ expr-equals self o ]
-        clone: function [return: [object!]] [ expr-clone self ]
-        modify: function [e [object!] return: [object!]] [ expr-modify self e ]
-        add-keys: function [keys [any-word! char! block! string!]][ expr-add-keys self keys ]
-        remove-keys: function [nb [integer!]][ expr-remove-keys self nb ]
-        remove-all-keys: function [][expr-remove-keys self (length? source)]
-        compute: function [/force return: [logic!]] [ either force [ expr-compute/force self ] [ expr-compute self ] ]
-        value: function [return: [number!]] [ expr-value self ]
-        discard-tokens: function [token [block!]] [ expr-discard-tokens self token ]
-        clear: function [return: [object!]] [ expr-clear self ]
-        clear-failed: function [return: [object!]] [ expr-clear-failed self]
-        probe: function [] [ expr-probe self ]
-        line-number: function [ return: [integer!]][ expr-line-number self ]
-
-        ; string for the presenter
-        value-as-string: function [return: [string!]] [ expr-value-as-string self ]
-
-        ; debug strings
-        mold: function [return: [string!] ] [ expr-mold self ]
-        as-string: function [return: [string!]] [ expr-source-as-string self ]
-        debug-string: function [return: [string!]] [ expr-debug-string self ]
-
+    ; Return ex value or default expression
+    _get-expr: function [ ex [object! none!] return: [object!]][
+        either ex [
+            assert ( in ex 'krnr ) "Expects an expr object"
+        ][
+            ex: a-expr
+        ]
+        ex
     ]
 
     ;----------------------------------------------------------------------------
     ; Expr functions
     ;----------------------------------------------------------------------------
 
-    ; create - a new void expression
-    expr-new: function [
+    ; expr-init initialise an expression with the given buffer
+    ; you would like to use expr-init in both calc and calc-core but the compiler
+    ; gets lost
+    expr-init: function [
         "Creates a new expression"
-        buffer [block! string!]
-        return: [object!]
+        src [block! string! object!]
+        /with ex [object! none!] "The expression to initialise if different from default"
         /compute
+        return: [object!]
     ][
-        o: make expr [] ; an model/expr object 
-        o/source: copy buffer ; make sure its mine !
+        ex: _get-expr ex
+        calc-core/expr-init/with src ex ; core initialisation
+        either object? src [
+            assert ( in src 'krnr ) "Expects an expr object if source object"
+            ex/val: src/val
+            ex/computed?: src/computed?
+            ex/visited?: false
+            ;ex/stacked?: false  - can modify an existing expression
+        ][
+            ex/val: none
+            ex/computed?: none
+            ex/visited?: false
+            ex/stacked?: false
+        ]
 
-        ; compute immediately
-        if compute [ expr-compute o ]
+        if compute [ expr-compute/with ex ] ; compute if requested
+        ex
+    ]
 
-        o
+    ; expr-clone
+    expr-clone: function [
+        /with ex [object! none!]
+        return: [object!]
+    ][
+        ex: _get-expr ex
+        res: make expr []
+        expr-init/with ex res
+        res
     ]
 
     ; check for equality
     expr-equals: function [
-        ex [object!]
         o [any-type!]
+        /with ex [object!]
         return: [logic!]
     ][
-        assert ( in ex 'krnr ) "Expects an expr object"
+        ex: _get-expr ex
         all [
-            object! == (type? o)
-            (reflect o 'class) == (reflect ex 'class) ; looks the notion of classes exist (same spec.)
+            object? o
+            in o 'krnr
             ex/source == o/source
             ex/failed == o/failed
             ex/tokens == o/tokens
             ex/node == o/node
             ex/val == o/val
             ex/computed? == o/computed?
-            ; visited and stacked are transient and irrelevant for comparaison
+            ; visited and stacked are transient and irrelevant for making the comparaison
         ]
     ]
 
-    ; clone an expression, copying the source buffer and all intermediate 
-    ; computations
-    expr-clone: function [
-        ex [object!]
-        return: [object!]
-    ][
-        assert ( in ex 'krnr ) "Expects an expr object"
-        o: make expr []
-        o/source: either none? ex/source [ none ][ copy ex/source ]
-        ; @ZWT alternatively - only clone source and leave pre-computed the rest
-        o/failed: either none? ex/failed [ none ][ at o/source index? ex/failed ]
-        o/tokens: copy/deep ex/tokens ; in case, though not likely to be impacted
-        o/node: ex/node ; no copy - node tree is a value, except for references (@ZWT verify ok)
-        o/val: ex/val
-        o/computed?: ex/computed?
-        o/visited?: false
-        o/stacked?: false
-        o
-    ]
-
-    ; modify an expression with the given source
-    expr-modify: function [
-        ex [object!]
-        o [object!]
-        return: [object!]
-    ][
-        assert ( in ex 'krnr ) "Expects an expr object"
-        assert ( in o 'krnr ) "Expects an expr object"
-        if same? ex o [ return ex ]
-        ex/source: either none? o/source [ none ][ copy o/source ]
-        ex/failed: either none? o/failed [ none ][ at ex/source index? o/failed ]
-        ex/tokens: copy/deep o/tokens ; not used but tokens could be updated
-        ex/node: o/node
-        ex/val: o/val
-        ex/computed?: o/computed?
-        ; ex/visited? transient - not to modify
-        ; ex/stacked? should not be changed
-        ex
+    comment [
+        ; modify an expression with the given source
+        expr-modify: function [
+            ex [object!]
+            o [object!]
+            return: [object!]
+        ][
+            assert ( in ex 'krnr ) "Expects an expr object"
+            assert ( in o 'krnr ) "Expects an expr object"
+            if same? ex o [ return ex ]
+            ex/source: either none? o/source [ none ][ copy o/source ]
+            ex/failed: either none? o/failed [ none ][ at ex/source index? o/failed ]
+            ex/tokens: copy/deep o/tokens ; not used but tokens could be updated
+            ex/node: o/node
+            ex/val: o/val
+            ex/computed?: o/computed?
+            ; ex/visited? transient - not to modify
+            ; ex/stacked? should not be changed
+            ex
+        ]
     ]
 
     ; debug string for expr 
     expr-probe: function [
-        ex [object!]
+        /with ex [object!]
     ][
-        assert ( in ex 'krnr ) "Expects an expr object"
-        print expr-mold ex
+        ex: _get-expr ex
+        print expr-mold/with ex
     ]
 
     ; full debug string for expr
     expr-mold: function [
-        ex [object!]
+        /with ex [object!]
         return: [string!]
     ][
-        assert ( in ex 'krnr ) "Expects an expr object"
+        ex: _get-expr ex
         mold compose [
             source: (ex/source)
             failed: (ex/failed)
@@ -3517,10 +3809,10 @@ model: make model-core [ ; extends model
 
     ; Clear an expression, resetting all values to void or none
     expr-clear: function [
-        ex [object!]
+        /with ex [object!]
         return: [object!]
     ][
-        assert ( in ex 'krnr ) "Expects an expr object"
+        ex: _get-expr ex
         clear ex/source
         ex/failed: none
         clear ex/tokens
@@ -3532,10 +3824,10 @@ model: make model-core [ ; extends model
 
     ; Clear failed key entries
     expr-clear-failed: function [
-        ex [object!]
+        /with ex [object!]
         return: [object!]
     ][
-        assert ( in ex 'krnr ) "Expects an expr object"
+        ex: _get-expr ex
         unless none? ex/failed [
             clear ex/failed
             ex/failed: none
@@ -3543,107 +3835,178 @@ model: make model-core [ ; extends model
         ex
     ]
 
-    ; Remove last entered keys
+    ; Remove entered keys (last per default)
     expr-remove-keys: function [
-        ex [object!]
-        nb [integer!]
-        return: [object!]
-    ][  
-        assert ( in ex 'krnr ) "Expects an expr object"
+        nb [integer!] "Number of keys to remove"
+        /with ex [object!] "Expression to modify"
+        /from-start "Remove from start"
+        return: [object!] ;"Modified expression"
+    ][
+        ex: _get-expr ex
+
         ; nothing to remove
         if nb <= 0 [
             return ex
         ]
-        ; reset ex/computed? if valid inputs
-        nb-failed: either none? ex/failed [ 0 ] [ length? ex/failed ]
-        if nb > nb-failed [
-            ex/computed?: none
-        ]
-        ; clear source
+
+        ; tracks initial sizes
+        nb-all: length? ex/source
+        nb-failed: either ex/failed [ length? ex/failed ] [ 0 ]
+        nb-valid: nb-all - nb-failed
+
+        ; adjust source - use clear (probably not necessary, but viewed a bug that was prevented by doing so
         case [
-            nb >= length? ex/source [ clear ex/source ]
-            true [ clear at ex/source ( (length? ex/source) - nb + 1 ) ]
+            nb >= nb-all [ clear ex/source ]
+            from-start [ remove/part ex/source nb ]
+            true [ clear at ex/source ( nb-all - nb + 1 ) ]
         ]
-        ; adjust failed keys to none
+
+        ; adjust computed if need be
         if all [
-            not none? ex/failed
-            ex/failed >= (tail ex/source)
+            ex/computed?
+            any [
+                from-start
+                nb > nb-failed
+            ]
         ][
-            ex/failed: none
+           ex/computed?: none ; none meaning to recompute vs false meaning computed but no value found
         ]
+
+        ; adjust failed if need be
+        if ex/failed [
+            either from-start [
+                either nb >= nb-all [
+                    ex/failed: none
+                ][
+                    ex/failed: at ex/failed (negate nb)
+                ]
+            ][
+                if nb >= nb-failed [
+                    ex/failed: none
+                ]
+            ]
+        ]
+
         ex
     ]
 
-    ; Add keys, one or several
-    expr-add-keys: function [
-        ex [object!]
-        keys [any-word! char! block! string!]
+    ; For lazy people
+    expr-remove-all-keys: function [
+        /with ex [object!]
+        return: [object!]
     ][
-        assert ( in ex 'krnr ) "Expects an expr object"
+        ex: _get-expr ex
+        expr-remove-keys/with (length? ex/source) ex
+    ]
+
+    ; Add keys, one or several to an expression
+    expr-add-keys: function [
+        keys [any-word! char! block! string!]
+        /with ex [object!]
+        /from-start
+        return: [object!]
+    ][
+        ex: _get-expr ex
         if any-word? keys [
             keys: to-lit-word keys
         ]
-        append ex/source keys
+        either from-start [
+            insert ex/source keys
+            if ex/failed [
+                nb: either series? keys [ length? keys ] [ 1 ]
+                ex/failed: at ex/failed ( nb + 1 )
+            ]
+        ][
+            append ex/source keys
+        ]
+        ex/computed?: none
+        ex
+    ]
+
+    ; Add a unary operator to an expression
+    expr-unary: function [
+        op [ any-word! ] "Unary operation"
+        /with ex [object!]
+        return: [object!]
+    ][
+        ex: _get-expr ex
+        insert ex/source 'paren-l
+        append ex/source 'paren-r
+        append ex/source op
+        ex/computed?: none
+        ex
+    ]
+
+    ; Merge an expression to another expression
+    ; using a binary operator
+    expr-binary: function [
+        op [ any-word! ] "Binary operation"
+        expr [ object! ]
+        /with ex [object!]
+        return: [object!]
+    ][
+        ex: _get-expr ex
+        insert ex/source 'paren-l
+        append ex/source 'paren-r
+        append ex/source op
+        append ex/source 'paren-l
+        append ex/source expr/source
+        append ex/source 'paren-r
         ex/computed?: none
         ex
     ]
 
     ; Returns the value of an expression
     expr-value: function [
-        ex [object!]
+        /with ex [object!]
         return: [number!]
     ][
-        assert ( in ex 'krnr ) "Expects an expr object"
-        if none? ex/computed? [
+        ex: _get-expr ex
+        either ex/computed? [
+            ex/val
+        ][
             if debug [
-                print ["Value accessed without prior recomputation for" ex/as-string]
+                print ["Value accessed without prior recomputation for" expr-as-string/with ex]
             ]
-            ; commented out to avoid backward reference
-            ;expr-compute ex
-            ;either ex/computed? [
-            ;    return ex/val
-            ;][
-            ;    return none
-            ;]
-            return none
+            none
         ]
-        ex/val
     ]
 
     ; Returns the value as a string to be displayed
     expr-value-as-string: function [
-        ex [object!]
+        /with ex [object!]
         return: [string!]
     ][
-        assert ( in ex 'krnr ) "Expects an expr object"
-        v: expr-value ex 
-        either none? v [ "" ][ funcs/form v ]
+        ex: _get-expr ex
+        v: expr-value/with ex 
+        either v [ funcs/format v ][ "" ]
     ]
 
-    ; Debugt string
+    ; Debug string
     expr-debug-string: function [
         "Debug string"
-        ex [object!]
+        /with ex [object!]
         return: [string!]
     ][
-        assert ( in ex 'krnr ) "Expects an expr object"
+        ex: _get-expr ex
+
         ; display node if present, display failed source and value
         ; if not, display source
         res: make string! 20
         case [
             ex/computed? [
-                append res expr-node-as-string ex
+                append res expr-node-as-string/with ex
                 if ex/failed [
                     append res " [ "
-                    append res expr-failed-as-string ex
+                    append res expr-failed-as-string/with ex
                     append res " ]"
                 ]
                 append res " = "
-                append res expr-value-as-string ex
+                append res expr-value-as-string/with ex
             ]
             all [ ex/source not empty? ex/source ][
                 append res "[ "
-                append res expr-source-as-string ex
+                append res expr-source-as-string/with ex
                 append res " ]"
             ]
             true []
@@ -3651,9 +4014,10 @@ model: make model-core [ ; extends model
         res
     ]
 
-    ;
+    ;-------------------------------------------------------
     ; Stack of expressions
-    ;
+    ;--------------------------------------------------------
+
     exprs-stack: copy [] ; the container of expressions
 
     ; get an expression by line number
@@ -3661,17 +4025,17 @@ model: make model-core [ ; extends model
         pick exprs-stack i
     ]
 
-    ;
+    ;------------------------------------------------------------------
     ; computation - rely on expr and exprs-stack because of variables
-    ;
+    ;------------------------------------------------------------------
 
     ; parse the source buffer using the pipe of lexer, spacer et syntaxer
+    ; currently the parsing is performed entirely each time the expression is computed
     _parse-expression: function [
         ex [object!] "The expression to parse"
         return: [object! none!] ; built node or none
     ][
         ; reset intermediate values
-        ex/computed?: none
         ex/tokens: copy []
         ex/failed: none
         ex/node: none
@@ -3702,7 +4066,7 @@ model: make model-core [ ; extends model
             e: exprs-get v/value
             either none? e [
                 if debug [
-                    print ["Found var:" tree/as-string v "- no expression found"]
+                    print ["Found var:" v/value "but no expression in the stack"]
                 ]
             ][
                 ; make the match for this variable permanent
@@ -3712,15 +4076,21 @@ model: make model-core [ ; extends model
             ; already matched, but is it still stacked ?
             either not e/stacked? [
                 if debug [
-                    print ["Found var:" tree/as-string v "- expression not stacked:" e/as-string]
+                    print ["Found var:" v/value "but matched expression is not stacked anymore:" expr-as-string/with e]
                 ]
                 v/value: 0 ; to be displayed as ?
                 e: none
             ][
                 ; matched and stacked, make sure the expression line number is correct
-                nb: e/line-number
+                nb: expr-line-number/with e
                 if v/value <> nb [
+                    if debug [
+                        print ["Change var:" v/value "into:" nb]
+                    ]
                     v/value: nb
+                ]
+                if debug [
+                    print ["Found var:" v/value "with expression:" expr-as-string/with e]
                 ]
             ]
         ]
@@ -3737,7 +4107,7 @@ model: make model-core [ ; extends model
         return: [word!] ; return computed, recomputed or failed
     ][
         if debug [
-            print [ "About to recompute" ex/as-string ]
+            print [ "About to recompute" expr-as-string/with ex ]
         ]
         ; check for possible cycles during the traversal
         ; any new expression that is not already resolved is marked so, 
@@ -3773,9 +4143,6 @@ model: make model-core [ ; extends model
                         break
                     ]
                     ; recursive recomputation if needed
-                    if debug [
-                        print ["Found var:" tree/as-string v "- recompute expr:" e/as-string]
-                    ]
                     r: _expr-compute-rec e force
                     case [
                         r == 'failed [
@@ -3823,7 +4190,7 @@ model: make model-core [ ; extends model
             res: 'failed
         ]
         if debug [
-            print [ "Computation of" ex/as-string "- res:" res "- val:" ex/val "- computed?:" ex/computed? ]
+            print [ "Computation of" expr-as-string/with ex "- res:" res "- val:" ex/val "- computed?:" ex/computed? ]
         ]
         res
     ]
@@ -3831,11 +4198,11 @@ model: make model-core [ ; extends model
     ; Compute an expression
     expr-compute: function [
         "Compute an expression : running the lexical and syntactic analysis and building up the expression tree"
-        ex [object!]
+        /with ex [object!]
         /force "Force the recomputation, otherwise only recompute failed or missing values"
         return: [logic!] ; true if a value was computed successfully
     ][
-        assert ( in ex 'krnr ) "Expects an expr object"
+        ex: _get-expr ex
         ; load the expression, and compute it recursively
         res: _expr-compute-rec ex force
         res <> 'failed
@@ -3843,22 +4210,17 @@ model: make model-core [ ; extends model
 
     ; Line number
     expr-line-number: function [
-        ex [object!]
+        /with ex [object!]
         return: [integer!]
     ][
-        assert ( in ex 'krnr ) "Expects an expr object"
-        exs: exprs-stack
-        res: forall exs [ 
-            if expr-equals exs/1 ex [
-                break/return index? exs
-            ]
-        ]
-        either res [ res ] [ 0 ]
+        ex: _get-expr ex
+        s: find/same exprs-stack ex
+        either s [ index? s ] [ 0 ]
     ]
 
-    ;
+    ;--------------------------------------------------------------------
     ; Exprs - stack of expressions and the vocabulary to manipulate them
-    ;
+    ;--------------------------------------------------------------------
 
     ; debug string
     exprs-mold: function [][
@@ -3868,7 +4230,7 @@ model: make model-core [ ; extends model
             i: i + 1
             append res i
             append res " "
-            append res expr-mold e
+            append res expr-mold/with e
         ]
     ]
 
@@ -3885,7 +4247,7 @@ model: make model-core [ ; extends model
             i: i + 1
             append res i
             append res ": ["
-            append res expr-debug-string e
+            append res expr-debug-string/with e
             append res "]^/"
         ]
         if i > 0 [
@@ -3920,7 +4282,7 @@ model: make model-core [ ; extends model
         ]
         ; resolve each expression recursively
         foreach e exprs-stack [
-            expr-compute e
+            expr-compute/with e
         ]
     ]
 
@@ -4001,7 +4363,8 @@ model: make model-core [ ; extends model
         ex
     ]
 
-    ; modify an expression and recompute
+    ; modify an expression with a source expression and recomputes
+    ; the modification is performed in place (i.e. the target expression is physically modified)
     exprs-modify: function [ 
         i [integer!] 
         sr [object!]
@@ -4010,7 +4373,7 @@ model: make model-core [ ; extends model
         assert ( in sr 'krnr ) "Expects an expr object"
         ex: pick exprs-stack i
         if none? ex [ return none ]
-        ex/modify sr
+        expr-init/with sr ex
         ex/computed?: none
         ; recompute
         exprs-recompute
@@ -4038,12 +4401,59 @@ model: make model-core [ ; extends model
         exprs-recompute
     ]
 
+    ; roll the stack
+    exprs-roll: function [
+        start [integer!] "Starting position to roll"
+        end [integer!] "Ending position to roll"
+        i [integer!] "Number of times to roll and direction (>0 in increasing order)"
+    ][
+        if any [ 
+            i == 0
+            end == start
+            end < 1
+            start < 1
+            end > length? exprs-stack
+            start > length? exprs-stack
+        ][ return ]
+        either i > 0 [
+            loop i [
+                move ( at exprs-stack end ) ( at exprs-stack start )
+            ]
+        ][
+            loop negate i [
+                move ( at exprs-stack start ) ( at exprs-stack end )
+            ]
+        ]
+    ]
+
+    ; move expressions into the stack
+    exprs-move: function [
+        src [integer!] "Source position to move"
+        i [integer!] "Number of expressions to move"
+        dest [integer!] "Target position"
+    ][
+        ; note that dest with move on the same serie, refers to the insertion point
+        ; if dest is before src, and to the insertion point - 1 otherwise
+        ; here exprs-move assumes it always refer to the insertion point
+        if any [ 
+            src < 1
+            src > length? exprs-stack
+            dest < 1
+            dest > ( 1 + length? exprs-stack )
+            i < 1
+            ( src + i - 1 ) > length? exprs-stack
+            all [ dest > src dest <= ( src + i ) ]
+        ][ return ]
+        dest: either dest > src [ dest - 1 ] [ dest ]
+        move/part ( at exprs-stack src ) ( at exprs-stack dest ) i
+    ]
+
 ]
-;model
+;calc
 ;]
 
 ;
-; Presenter : Interface between the model (recalculator/model) and the view (recalculator/display)
+; Presenter : Interface between the model (recalculator/calc) and the view (recalculator/display)
 ; Mainly it manipulates the model, maintains the state of the recalculator, and offers 
 ; an interface to the view to implement most of the work. It implements all the actions and is able
 ; to undo or redo any of them. It has no knowledge of the display however. The display gets notified
@@ -4059,10 +4469,12 @@ presenter: reactor [
     ; current angle mode
     angle: 'radian
 
-    ; current expression, mutable (as compared with stacked expressions that are immutables)
-    expr: model/expr-new []
+    ; current stack order mode
+    ; stack-up : move to the top ( lower index )
+    ; stack-down : move to the bottom of the stack ( higher index )
+    stack-order: 'stack-up
 
-    ; formatted string to display
+    ; formatted string to display - no copy as unmodified values
     expr-as-string: ""          ; formatted expression for display
     value-as-string: ""         ; computed value for display
     failed-as-string: ""        ; bad-keys formatted for display
@@ -4072,11 +4484,12 @@ presenter: reactor [
     expr-stack-as-list: copy [] ; expr stack as a text list
     expr-index: 0               ; currently selected expression index or 0 if none
 
-    ; tracking if a line was just pulled into the buffer
-    ; call to pull-expr sets the value of pulled-expr-index
-    ; any other call (key entries, line selection etc.) unsets this value
-    ; if clear buffer is called and expr-index-pulled is set, the corresponding stack entry is cleared
-    expr-index-pulled: 0
+    ; tracking whether the current expression is linked to the selection in the stack
+    ; - the expression in the current buffer is linked to an expression of the stack whenever a line of the stack is double-clicked (load-expr)
+    ; - if a linked expression is validated (enter), the linked expression is modified accordingly,
+    ; - if a linked expression is cleared twice (clear-expr), the linked expression is removed,
+    ; - the link is lost whenever a new selection is made in the stack (sel-expr)
+    linked-expr: false
 
     ; undo/redo stored in a stack format
     ; next-undo pointing to the next command to undo
@@ -4092,28 +4505,28 @@ presenter: reactor [
 
     ; helper function for testing - general cleanup
     reset: function [][
-        ;self/debug: false
-        model/exprs-clear
+        calc/expr-init []
+        calc/exprs-clear
         self/angle: 'radian
-        self/expr: model/expr-new []
         self/expr-as-string: ""
         self/value-as-string: ""
         self/failed-as-string: ""
         self/expr-stack-as-list: copy []
         self/expr-index: 0
+        self/linked-expr: false
         self/next-undo: copy []
     ]
 
     ; also for debug, and regression testing
     expr-debug-string: function [ return: [string!] ][
-        expr/debug-string
+        calc/expr-debug-string
     ]
 
     expr-stack-debug: function [ return: [string!] ][
         res: copy []
         collect/into [
-            foreach ex model/exprs-gets [
-                keep rejoin [ ex/node-as-string " = " ex/value-as-string ]
+            foreach ex calc/exprs-gets [
+                keep rejoin [ calc/expr-node-as-string/with ex " = " calc/expr-value-as-string/with ex ]
             ]
         ] res
         res
@@ -4128,18 +4541,18 @@ presenter: reactor [
     ; the reactor framework takes charge to notify the view to refresh the display
     _on-keys-update: function [][
 
-        ; recompute the expression
-        expr/compute
+        ; recompute the expression in the buffer
+        calc/expr-compute
 
         ; refresh displayed strings
-        self/failed-as-string: expr/failed-as-string
-        self/expr-as-string: expr/node-as-string
-        self/value-as-string: expr/value-as-string
+        self/failed-as-string: calc/expr-failed-as-string
+        self/expr-as-string: calc/expr-node-as-string
+        self/value-as-string: calc/expr-value-as-string
 
         if debug [
-            s: expr-debug-string
-            if s == "" [ s: "none" ]
-            print [ "Expression updated to " s ]
+            s: calc/expr-debug-string
+            if s == "" [ s: {""} ]
+            print [ "Expression updated to" s ]
         ]
 
         exit
@@ -4151,20 +4564,24 @@ presenter: reactor [
     ; and the text-list is notified using the reactor mechanism
     _on-expr-stack-update: function [][
 
+        ; recompute expressions in the stack
+        ; (in case an expression was modified in the stack directly)
+        calc/exprs-recompute
+
         ; joining together var id, expression, value
         s: presenter/key-label 'var
         i: 0
-        max: model/exprs-nb
+        max: calc/exprs-nb
         data: collect [
-            foreach ex model/exprs-gets [
+            foreach ex calc/exprs-gets [
                 i: i + 1
                 keep rejoin [
                     "" ; join as string
                     pad/left rejoin [ "" s i ] 3
                     " : "
-                    ex/value-as-string 
+                    calc/expr-value-as-string/with ex
                     " = "
-                    ex/node-as-string 
+                    calc/expr-node-as-string/with ex
                 ]
             ]
         ]
@@ -4245,56 +4662,88 @@ presenter: reactor [
         self/angle: 'gradient
     ]
 
-    ; Push a key or a command
-    ; This is the main entry point for the display all entered keys are processed here
-    ; either triggering a dedicated control command or pushing a key value in the buffer
-    push-key: function [
-        key [word!]
-        return: [logic!]
-    ][
-        k: select keys key
-        if not block? k [
-            if debug [
-                print [ "Unknown key " key ]
-            ]
-            return false
-        ]
-        ; transfer control keys
-        if k/2 == 'control [
-            cmd: in self k/1
-            either not none? cmd [
-                return do cmd
-            ][
-                if debug [
-                    print [ "Unknown command for key " key ]
-                ]
-            ]
-        ]
-        ; regular key to push
-        key-entry to-lit-word key
-    ]
-
     ; Select an expression in the stack
     ; this is notified in return to the display
     sel-expr: function [
         index [integer!]
         return: [integer!] ; effective selection
     ][
-        set-quiet in self 'expr-index-pulled 0
-        if any [ index == 0 index > model/exprs-nb ] [
+        ; remove transient linked-expr in all cases
+        set-quiet in self 'linked-expr false
+
+        if any [ index == 0 index > calc/exprs-nb ] [
             index: 0
         ]
         self/expr-index: index
         expr-index
     ]
 
+    ; Returns the key entry or none
+    get-key-entry: function [
+        key [any-word!]
+        return: [block!]
+    ][
+        k: select keys to-word key
+        if not block? k [
+            if debug [
+                print [ "Unknown key " key ]
+            ]
+            return none
+        ]
+        k
+    ]
+
+    ; Push a key or a command
+    ; This is the main entry point as all entered keys are processed from here
+    ; either triggering a dedicated control command or pushing a key value in the buffer
+    push-key: function [
+        key [word!]
+        return: [logic!]
+    ][
+        k: get-key-entry key
+        ; transfer control keys
+        if k/2 == 'control [
+            cmd: do in self k/1 ; do for compilation
+            either cmd [
+                return do cmd
+            ][
+                if debug [
+                    print [ "Unknown command for key " key ]
+                ]
+                return false
+            ]
+        ]
+        ; if the key is a unary or binary operation and there is no ongoing expression
+        ; attempt to apply the operation to the stack
+        if all [
+            calc/expr-empty?
+            calc/exprs-nb >= 1
+            any [
+                k/2 == 'unary
+                k/2 == 'binary
+            ]
+        ][
+            res: either k/2 == 'unary [
+                unary-stack-operation k/1
+            ][
+                binary-stack-operation k/1
+            ]
+            if res [
+                return res
+            ]
+        ]
+
+        ; regular key to push
+        key-entry to-lit-word key
+    ]
+
     ;;
     ;; Actions keys
     ;;
     ;; Those actions trigger the do/undo mechanism. A command is not performed
-    ;; directly but stored in the undo/redo buffer and performed.
+    ;; directly but stored in the undo/redo buffer then performed.
     ;; In consequence redo does exactly the same as do.
-    ;; And undo attempts to reverse prior actions.
+    ;; Undo reverse corresponding do/redo actions.
     ;;
 
     ; Add a key (or several - though not used) to the current expression
@@ -4302,7 +4751,7 @@ presenter: reactor [
         keys [any-word! block!] "A key or a list of keys"
         return: [logic!]
     ][
-        either (type? keys) == #[block!] [
+        either block? keys [
             nb-keys: length? keys
             keys: copy keys
         ][
@@ -4312,123 +4761,172 @@ presenter: reactor [
         cmd: compose/deep/only [
             name: 'key-entry
             level: 'buffer
-            cmd-do: [ expr/add-keys ( keys ) _on-keys-update ]
-            cmd-undo: [ expr/remove-keys ( nb-keys ) _on-keys-update ]
+            cmd-do: [ calc/expr-add-keys ( keys ) _on-keys-update ]
+            cmd-undo: [ calc/expr-remove-keys ( nb-keys ) _on-keys-update ]
         ]
         dodo cmd
     ]
 
-    ; Back-space : remove last entered key
-    back-space: function [
+    ; Backspace : remove last entered key in the current expression
+    backspace: function [
         return: [logic!]
     ][
-        if expr/empty? [; nothing to back-space
+        if calc/expr-empty? [; nothing to backspace
             return false
         ]
         cmd: compose/deep/only [
-            name: 'back-space
+            name: 'backspace
             level: 'buffer
-            cmd-do: [ expr/remove-keys 1 _on-keys-update ]
-            cmd-undo: [ expr/add-keys ( expr/last-key ) _on-keys-update ]
+            cmd-do: [ calc/expr-remove-keys 1 _on-keys-update ]
+            cmd-undo: [ calc/expr-add-keys ( calc/expr-last-key ) _on-keys-update ]
         ]
         dodo cmd
     ]
 
     ; Clear-expr : clear the current expression in the buffer and possibly also the stack expression
+    ; - clear the current expression content,
+    ; - if the current expression is linked and cleared twice, also remove it from the stack
     clear-expr: function [
         return: [logic!]
     ][
-        if expr/empty? [ ; no character to clear
-            return false
+        ; if buffer is empty, remove from the stack instead
+        if calc/expr-empty? [
+            return remove-expr
         ]
-        ; check if last pulled
-        either expr-index-pulled <> 0 [
-            if debug [
-                print ["Last pulled expression set:" expr-index-pulled]
-            ]
-            ; clear the buffer and removes the line
-            cmd-do: compose [ 
-                expr/remove-all-keys 
-                model/exprs-remove ( expr-index-pulled ) self/expr-index: 0
-                _on-expr-stack-update _on-keys-update
-            ]
-            cmd-undo: compose/only [
-                expr/add-keys ( copy expr/keys )
-                model/exprs-add/where ( model/exprs-get expr-index-pulled ) ( expr-index-pulled ) self/expr-index: ( expr-index-pulled )
-                _on-expr-stack-update _on-keys-update
-            ]
-        ][ 
-            ; just clear the buffer
-            cmd-do: [ expr/remove-all-keys _on-keys-update ]
-            cmd-undo: compose/only [ expr/add-keys ( copy expr/keys ) _on-keys-update ]
+        ; commands
+        cmd-do: [
+            calc/expr-clear 
+            _on-keys-update
         ]
-
+        cmd-undo: compose/only [ 
+            calc/expr-add-keys ( copy calc/expr-keys )
+            _on-keys-update
+        ]
         cmd: compose/only [
             name: 'clear-expr
-            level: ( either expr-index-pulled <> 0 ['stack]['buffer] )
+            level: 'buffer
             cmd-do: ( cmd-do )
             cmd-undo: ( cmd-undo )
         ]
         dodo cmd
     ]
 
-    ; clear-all key : clear all expressions
+    ; remove-expr : remove an expression from the stack
+    remove-expr: function [
+        return: [logic!]
+    ][
+        ; nothing to remove
+        if calc/exprs-nb < 1 [
+            return false
+        ]
+        ; expression to remove
+        idx: either expr-index == 0 [ calc/exprs-nb ] [ expr-index ]
+        new-sel: case [
+            calc/exprs-nb == 1 [ 0 ]
+            idx == 1 [ 1 ]
+            true [ idx - 1 ]
+        ]
+        expr: calc/exprs-get idx
+        ; clear the buffer and removes the line
+        cmd-do: compose [
+            calc/exprs-remove ( idx ) 
+            sel-expr ( new-sel )
+            _on-expr-stack-update
+        ]
+        cmd-undo: compose [
+            calc/exprs-add/where ( expr ) ( idx ) 
+            sel-expr ( expr-index )
+            set-quiet in self 'linked-expr ( linked-expr )
+            _on-expr-stack-update
+        ]
+        cmd: compose/only [
+            name: 'remove-expr
+            level: 'stack
+            cmd-do: ( cmd-do )
+            cmd-undo: ( cmd-undo )
+        ]
+        dodo cmd
+    ]
+
+    ; Clear-all : clear the buffer and all expressions in the stack
     clear-all: function [
         return: [logic!]
     ][
         if all [ ; nothing to clear
-            model/exprs-nb == 0
-            expr/empty?
+            calc/exprs-nb == 0
+            calc/expr-empty?
         ][
             return false
         ]
         cmd: compose/deep/only [
             name: 'clear-all
             level: 'stack
-            cmd-do: [ model/exprs-clear self/expr-index: 0 expr/remove-all-keys _on-expr-stack-update _on-keys-update ]
-            cmd-undo: [ model/exprs-restore ( copy model/exprs-gets ) self/expr-index: ( expr-index ) expr/add-keys ( copy expr/keys ) _on-expr-stack-update _on-keys-update ]
+            cmd-do: [
+                calc/exprs-clear
+                sel-expr 0
+                calc/expr-clear
+                _on-expr-stack-update _on-keys-update
+            ]
+            cmd-undo: [ 
+                calc/exprs-restore ( copy calc/exprs-gets )
+                sel-expr ( expr-index )
+                calc/expr-add-keys ( copy calc/expr-keys )
+                _on-expr-stack-update _on-keys-update
+            ]
         ]
         dodo cmd
     ]
 
-    ; enter key : add or update the stack with the current expression, possibly void
-    ; if the current expression has failed keys, the failed keys are kept in the buffer
-    ; if an expression is selected in the stack (expr-index <> 0), this expression 
-    ; is modified (replaced actually), otherwise a new expression is added at the bottom
-    ; of the stack
+    ; enter : can trigger multiple actions
+    ; - if current expression is void, and buffer is linked, remove selected expression
+    ; - if void but not linked, duplicate last expression or currently selected expression,
+    ; - if current expression is not valid, but there is a pending key that is an operator,
+    ; apply this operator to the stack
+    ; - if current expression and selected one are identical, duplicate it
+    ; - if current expression is valid, add the new expression to the stack 
+    ; or modify the one currently selected, pending keys are left as is
     enter: function [
         return: [logic!]
     ][
-        ; nothing to enter if the current expression is not valid
-        ; or both the selected expression and current expression are equals
-        ; prevents generating unecessary commands that don't change anything
-        c: model/exprs-get expr-index
-        if any [
-            not expr/valid?
-            all [ c expr/equals c ]
-        ][
-            if debug [
-                print "Nothing to enter."
-                print [ 
-                    "expr valid?" expr/valid?
-                    "selected" expr-index
-                    "equals?" expr/equals c
-                ]
+        ; current expression is void
+        if calc/expr-empty? [
+            either linked-expr [
+                ; either remove linked expression if any
+                return remove-expr
+            ][
+                ; or duplicate selected expression or top of stack
+                return dup-expr
+            ]
+        ]
+
+        ; current expression is not valid
+        if not calc/expr-valid? [
+            ; if next pending key is a binary operator
+            ; attempts to apply it to the stack
+            k: get-key-entry calc/expr-first-failed
+            if k/2 == 'binary [
+                return binary-stack-operation/pending k/1
             ]
             return false
         ]
 
+        ; current expression and selected one are identical
+        ; duplicate selected expression
+        c: calc/exprs-get expr-index
+        if all [ c calc/expr-equals c ][
+            return dup-expr/buffer
+        ]
+
         ; forget whatever was previously undone
-        ; this is done by default when doing the command (see dodo), 
-        ; but here the handling of the failed keys requires doing it now
-        ; (because failed keys will be undone and redone)
+        ; normaly done in dodo but here the handling of the failed keys
+        ; requires doing it before as failed keys will be undone and redone
         forget-undones
 
-        ; if ongoing failed keys, roll them back temporarily
+        ; if ongoing failed keys, roll them back temporarily (they are put back below)
         s: next-undo
         until [
             not all [
-                expr/failed?
+                calc/expr-failed?
                 undo
             ]
         ]
@@ -4439,12 +4937,12 @@ presenter: reactor [
             ]
         ]
 
-        ; the buffer should contain the expression that needs being saved
-        saved-expr: expr/clone
+        ; clone the current expression (the one in the current buffer)
+        new-expr: calc/expr-clone
 
-        ; get rid of all previous buffer commands that served for building the current expression
-        ; consequently when undoing this command, the corresponding buffer entries will not be refreshed
-        ; only the buffer will be restored
+        ; get rid of buffer commands that served for building the ongoing expression
+        ; when undoing the command, the corresponding buffer entries will not be refreshed
+        ; only the entire buffer will be restored
         s: next-undo
         until [
             any [ 
@@ -4463,31 +4961,49 @@ presenter: reactor [
 
         ; enter commands is split in two separate commands :
         ; 1- a command that fills the character buffer (1.1) and updates the stack (1.2)
-        ; 2- an extra command (2) that clears the character buffer and leaves void for the next entry to come
+        ; 2- an extra command (2) that clears the character buffer and leaves it void for the next entry to come
         ;
         ; 1.1 - key buffer
-        cmd-do: compose/only [ expr/remove-all-keys expr/add-keys ( copy saved-expr/keys ) ]
-        cmd-undo: compose/only [ expr/remove-all-keys expr/add-keys ( copy expr/keys ) ]
+        cmd-do: compose/only [ 
+            calc/expr-clear
+            calc/expr-add-keys ( copy calc/expr-keys/with new-expr )
+        ]
+        cmd-undo: compose/only [ 
+            calc/expr-clear
+            calc/expr-add-keys ( copy calc/expr-keys )
+        ]
 
         ; 1.2 - stack
         modified?: false
-        either any [
-            expr-index == 0
-            expr-index > model/exprs-nb
+        idx: expr-index
+        either linked-expr [
+            ; existing expression is modified
+            modified?: true
+            old-expr: calc/expr-clone/with ( calc/exprs-get idx )
+            append cmd-do compose [ 
+                calc/exprs-modify ( idx ) ( new-expr )
+                sel-expr ( idx )
+                set-quiet in self 'linked-expr true ; link the selection
+            ]
+            append cmd-undo compose [ 
+                calc/exprs-modify ( idx ) ( old-expr )
+                sel-expr ( expr-index )
+                set-quiet in self 'linked-expr true
+            ]
         ][
             ; newly added expression
-            n: model/exprs-nb + 1
-            append cmd-do compose [ model/exprs-add/where ( saved-expr ) ( n ) self/expr-index: ( n ) ]
-            append cmd-undo compose [ model/exprs-remove ( n ) self/expr-index: 0 ]
-        ][
-            ; modified existing expression
-            modified?: true
-            target-saved-expr: model/expr-clone model/exprs-get expr-index
-            append cmd-do compose [ model/exprs-modify ( expr-index ) ( saved-expr ) self/expr-index: ( expr-index ) true ] ; final true - for debug
-            append cmd-undo compose [ model/exprs-modify ( expr-index ) ( target-saved-expr ) self/expr-index: ( expr-index ) false ] ; final false - for debug
+            idx: either expr-index == 0 [ calc/exprs-nb + 1 ] [ expr-index + 1 ]
+            append cmd-do compose [ 
+                calc/exprs-add/where ( new-expr ) ( idx )
+                sel-expr ( idx )
+            ]
+            append cmd-undo compose [ 
+                calc/exprs-remove ( idx )
+                sel-expr ( expr-index )
+            ]
         ]
 
-        ; refreshes the buffer and the list for updating the display
+        ; refreshes the buffer and the list
         append cmd-do [ _on-expr-stack-update _on-keys-update ]
         append cmd-undo [ _on-expr-stack-update _on-keys-update ]
 
@@ -4498,15 +5014,25 @@ presenter: reactor [
             cmd-do: ( cmd-do )
             cmd-undo: ( cmd-undo )
         ]
+
         res: dodo/keep cmd
 
-        ; 2- add an extra command for clearing the buffer
+        ; 2- add an extra command just for clearing the buffer
         if res [
             cmd: compose/deep/only [
                 name: 'enter-2
                 level: 'stack
-                cmd-do: [ expr/remove-all-keys self/expr-index: ( either modified? [ expr-index ][0] ) _on-keys-update ]
-                cmd-undo: [ expr/add-keys ( copy expr/keys ) self/expr-index: ( expr-index ) _on-keys-update ]
+                cmd-do: [
+                    calc/expr-clear
+                    sel-expr ( idx )
+                    _on-keys-update 
+                ]
+                cmd-undo: [ 
+                    calc/expr-add-keys ( copy calc/expr-keys )
+                    sel-expr ( idx )
+                    set-quiet in self 'linked-expr true ; link the selection
+                    _on-keys-update
+                ]
             ]
             res: dodo/keep cmd
         ]
@@ -4522,35 +5048,319 @@ presenter: reactor [
                 ]
             ]
         ]
+
         return res
 
     ]
 
     ; Retrieves in the buffer the currently selected expression
-    ; if none available, clears the buffer
-    pull-expr: function [
+    load-expr: function [
         return: [logic!]
     ][
-        ; nothing to pull if nothing selected and current expression is empty
-        ; or selection and current expression are equal
-        selected: model/exprs-get expr-index
-        if any [
-            all [ (not selected) (expr/empty?) ]
-            all [ selected (expr/equals selected) ]
-        ][
-            ; still reset expr-index-pulled
-            set-quiet in self 'expr-index-pulled expr-index
+        ; if nothing selected, do nothing
+        selected: calc/exprs-get expr-index
+        if not selected [
             if debug [
                 print "Nothing to pull."
             ]
             return false
         ]
-        either none? selected [
-            cmd-do: [ expr/remove-all-keys self/expr-index: 0 _on-keys-update ]
-            cmd-undo: compose/only [ expr/remove-all-keys expr/add-keys ( copy expr/keys ) self/expr-index: 0 _on-keys-update ]
-        ][
-            cmd-do: compose/only [ expr/remove-all-keys expr/add-keys ( copy selected/keys ) self/expr-index: ( expr-index ) _on-keys-update ]
-            cmd-undo: compose/only [ expr/remove-all-keys expr/add-keys ( copy expr/keys ) self/expr-index: ( expr-index ) _on-keys-update ]
+        ; commands
+        cmd-do: compose/only [
+            calc/expr-clear
+            calc/expr-add-keys ( copy calc/expr-keys/with selected )
+            sel-expr ( expr-index )
+            set-quiet in self 'linked-expr true ; remember selected expression
+            _on-keys-update
+        ]
+        cmd-undo: compose/only [
+            calc/expr-clear
+            calc/expr-add-keys ( copy calc/expr-keys ) 
+            sel-expr ( expr-index )
+            _on-keys-update
+        ]
+        cmd: compose/only [
+            name: 'load-expr
+            level: 'stack
+            cmd-do: ( cmd-do )
+            cmd-undo: ( cmd-undo )
+        ]
+        dodo cmd
+    ]
+
+    ; Apply a unary operation to the selected expression or last expression
+    unary-stack-operation: function [
+        op [any-word!] "A unary operation"
+        return: [logic!]
+    ][
+        if calc/exprs-nb < 1 [
+            return false
+        ]
+        idx: either expr-index == 0 [ calc/exprs-nb ] [ expr-index ]
+        expr: calc/exprs-get idx
+        old-expr: calc/expr-clone/with expr
+        ; commands
+        cmd-do: compose [
+            calc/expr-unary/with op expr
+            sel-expr ( idx )
+            _on-expr-stack-update
+        ]
+        cmd-undo: compose [
+            calc/exprs-modify ( idx ) ( old-expr )
+            sel-expr ( expr-index )
+            _on-expr-stack-update
+        ]
+        cmd: compose/only [
+            name: 'unary-stack-operation
+            level: 'stack
+            cmd-do: ( cmd-do )
+            cmd-undo: ( cmd-undo )
+        ]
+        dodo cmd
+    ]
+
+    ; Apply a binary operation to the selected expression and the previous expression 
+    ; or to the last two expressions
+    ; note that the expression modified is the first expression (and not the second)
+    binary-stack-operation: function [
+        op [ any-word! ] "A binary operation"
+        /pending "If operator is a pending key to flush from the buffer"
+        return: [ logic! ]
+    ][
+        if calc/exprs-nb < 2 [
+            return false
+        ]
+        idx: case [
+            expr-index == 0 [ calc/exprs-nb - 1 ]
+            expr-index == 1 [ 1 ]
+            true [ expr-index - 1 ]
+        ]
+        ; gets current expressions and keeps copies
+        expr: calc/exprs-get idx
+        old-expr1: calc/expr-clone/with expr
+        old-expr2: calc/expr-clone/with calc/exprs-get ( idx + 1 )
+        ; if pending, the operator is a failed key to be removed from the buffer
+        cmd-pending-do: cmd-pending-undo: []
+        if pending [
+            cmd-pending-do: [
+                calc/expr-remove-keys/from-start 1
+            ]
+            cmd-pending-undo: compose [
+                calc/expr-add-keys/from-start ( to-lit-word op )
+            ]
+        ]
+        ; commands
+        cmd-do: compose [
+            ( cmd-pending-do )
+            calc/expr-binary/with ( to-lit-word op ) ( old-expr2 ) ( expr )
+            calc/exprs-remove ( idx + 1 )
+            sel-expr ( idx )
+            ( cmd-pending-do )
+            _on-expr-stack-update _on-keys-update
+        ]
+        cmd-undo: compose [
+            calc/exprs-remove ( idx ) 
+            calc/exprs-add/where ( old-expr1 ) ( idx )
+            calc/exprs-add/where ( old-expr2 ) ( idx + 1 )
+            sel-expr ( expr-index )
+            ( cmd-pending-undo )
+            _on-expr-stack-update _on-keys-update
+        ]
+        cmd: compose/only [
+            name: 'binary-stack-operation
+            level: 'stack
+            cmd-do: ( cmd-do )
+            cmd-undo: ( cmd-undo )
+        ]
+        dodo cmd
+    ]
+
+    ; Duplicate an expression in the stack
+    ; the selected expression or the last expression is the one duplicated
+    dup-expr: function [
+        /buffer "Clears also the buffer - see enter"
+        return: [logic!]
+    ][
+        if calc/exprs-nb < 1 [
+            return false
+        ]
+        idx: either expr-index == 0 [ calc/exprs-nb ][ expr-index ]
+        expr: calc/exprs-get idx
+        copy-expr: calc/expr-clone/with expr
+        ; clears buffer
+        cmd-buffer-do: cmd-buffer-undo: []
+        if buffer [
+            cmd-buffer-do: compose [ 
+                calc/expr-clear
+            ]
+            cmd-buffer-undo: compose/only [ 
+                calc/expr-clear
+                calc/expr-add-keys ( copy calc/expr-keys )
+            ]
+        ]
+        ; commands
+        cmd-do: compose [
+            ( cmd-buffer-do )
+            calc/exprs-add/where ( copy-expr ) ( idx + 1 )
+            sel-expr ( idx + 1 )
+            _on-expr-stack-update _on-keys-update
+        ]
+        cmd-undo: compose [
+            ( cmd-buffer-undo )
+            calc/exprs-remove ( idx + 1 )
+            sel-expr ( expr-index )
+            _on-expr-stack-update _on-keys-update
+        ]
+        cmd: compose/only [
+            name: 'dup-expr
+            level: 'stack
+            cmd-do: ( cmd-do )
+            cmd-undo: ( cmd-undo )
+        ]
+        dodo cmd
+    ]
+
+    ; Swap with top
+    swap-expr: function [
+        return: [logic!]
+    ][
+        ; less than two expressions nothing to do
+        if calc/exprs-nb < 2 [
+            return false
+        ]
+        ; indexes
+        src: calc/exprs-nb
+        dest: case [
+            expr-index == 0 [ dest: 1 ] ; swap with bottom
+            expr-index == calc/exprs-nb [ dest: 1 ]
+            true [ expr-index ]
+        ]
+        ; commands
+        cmd-do-move2: cmd-undo-move2: []
+        if ( dest + 1 ) < src [ ; second move if dest is deeper in the stack
+            cmd-do-move2: compose [ calc/exprs-move ( dest + 1 ) 1 ( src + 1 ) ]
+            cmd-undo-move2: compose [ calc/exprs-move ( src - 1 ) 1 ( dest ) ]
+        ]
+        cmd-do: compose [
+            calc/exprs-move ( src ) 1 ( dest )
+            ( cmd-do-move2 )
+            sel-expr ( src )
+            _on-expr-stack-update
+        ]
+        cmd-undo: compose [
+            calc/exprs-move ( dest ) 1 ( src + 1 )
+            ( cmd-undo-move2 )
+            sel-expr ( expr-index )
+            _on-expr-stack-update
+        ]
+        cmd: compose/only [
+            name: 'swap-expr
+            level: 'stack
+            cmd-do: ( cmd-do )
+            cmd-undo: ( cmd-undo )
+        ]
+        dodo cmd
+    ]
+
+    ; move a line upwards in the stack (i.e. decreasing index)
+    ; the line moved is the line currently selected, otherwise the top of stack
+    ; if the line reaches the beginning of the stack, it is further moved from the top
+    up-expr: function [
+        return: [logic!]
+    ][
+        if calc/exprs-nb < 2 [
+            return false
+        ]
+        ; src line to move
+        src: either expr-index == 0 [ calc/exprs-nb ][ expr-index ]
+        ; nb moves
+        nb: 1
+        ; destination
+        dest: ( mod ( src - 1 - nb ) calc/exprs-nb ) + 1
+        if src == dest [
+            return false
+        ]
+        ; commands
+        cmd-do: compose [
+            calc/exprs-move ( src ) 1 ( either dest > src [ dest + 1 ] [ dest ] )
+            sel-expr ( dest )
+            _on-expr-stack-update
+        ]
+        cmd-undo: compose [
+            calc/exprs-move ( dest ) 1 ( either src > dest [ src + 1 ] [ src ] )
+            sel-expr ( expr-index )
+            _on-expr-stack-update
+        ]
+        cmd: compose/only [
+            name: 'up-expr
+            level: 'stack
+            cmd-do: ( cmd-do )
+            cmd-undo: ( cmd-undo )
+        ]
+        dodo cmd
+    ]
+
+    ; move a line downwards in the stack (increasing index)
+    ; the line moved is the line currently selected, otherwise top of stack
+    ; if the line reaches the end of the stack, it is further moved from its start
+    down-expr: function [
+        return: [logic!]
+    ][
+        if calc/exprs-nb < 2 [
+            return false
+        ]
+        ; source
+        src: either expr-index == 0 [ calc/exprs-nb ][ expr-index ]
+        ; nb moves
+        nb: 1
+        ; destination
+        dest: ( mod ( src - 1 + nb ) calc/exprs-nb ) + 1
+        if src == dest [
+            return false
+        ]
+        ; commands
+        cmd-do: compose [
+            calc/exprs-move ( src ) 1 ( either dest > src [ dest + 1 ] [ dest ] )
+            sel-expr ( dest )
+            _on-expr-stack-update
+        ]
+        cmd-undo: compose [
+            calc/exprs-move ( dest ) 1 ( either src > dest [ src + 1 ] [ src ] )
+            sel-expr ( expr-index )
+            _on-expr-stack-update
+        ]
+        cmd: compose/only [
+            name: 'down-expr
+            level: 'stack
+            cmd-do: ( cmd-do )
+            cmd-undo: ( cmd-undo )
+        ]
+        dodo cmd
+    ]
+
+    ; move to the top either the selected expression, 
+    ; or the first expression in the stack if no selection
+    pull-expr: function [
+        return: [logic!]
+    ][
+        if calc/exprs-nb < 2 [
+            return false
+        ]
+        ; source index
+        src: expr-index
+        if any [ src == 0 src >= calc/exprs-nb ] [ src: 1 ]
+        ; destination - top of stack
+        dest: calc/exprs-nb
+        ; commands
+        cmd-do: compose [
+            calc/exprs-move ( src ) 1 ( dest + 1 )
+            sel-expr ( dest )
+            _on-expr-stack-update
+        ]
+        cmd-undo: compose [
+            calc/exprs-move ( dest ) 1 ( src )
+            sel-expr ( expr-index )
+            _on-expr-stack-update
         ]
         cmd: compose/only [
             name: 'pull-expr
@@ -4558,13 +5368,185 @@ presenter: reactor [
             cmd-do: ( cmd-do )
             cmd-undo: ( cmd-undo )
         ]
-        index: expr-index
-        res: dodo cmd
+        dodo cmd
+    ]
 
-        ; keep track of the last pulled expression (see clear-expr for its use)
-        set-quiet in self 'expr-index-pulled index
+    ; move the top expression to the selected position in the stack,
+    ; ( or to the first position in the stack if none selected )
+    push-expr: function [
+        return: [logic!]
+    ][
+        if calc/exprs-nb < 2 [
+            return false
+        ]
+        ; source index - top of stack
+        src: calc/exprs-nb
+        ; destination
+        dest: expr-index
+        if any [ dest == 0 src == dest ] [ dest: 1 ]
+        ; commands
+        cmd-do: compose [
+            calc/exprs-move ( src ) 1 ( dest )
+            sel-expr ( dest )
+            _on-expr-stack-update
+        ]
+        cmd-undo: compose [
+            calc/exprs-move ( dest ) 1 ( src + 1 )
+            sel-expr ( expr-index )
+            _on-expr-stack-update
+        ]
+        cmd: compose/only [
+            name: 'push-expr
+            level: 'stack
+            cmd-do: ( cmd-do )
+            cmd-undo: ( cmd-undo )
+        ]
+        dodo cmd
+    ]
 
-        return res
+    ; Roll the stack in clockwise order
+    ; if no selection or selection at the top, rolls all the stack,
+    ; otherwise only the expressions from the selection to the top
+    roll-clockwise: function [
+        return: [logic!]
+    ][
+        ; less than two expressions nothing to roll
+        if calc/exprs-nb < 2 [
+            return false
+        ]
+        ; indexes
+        start: either expr-index == 0 [ 1 ][ expr-index ]
+        end: calc/exprs-nb
+        if start == end [
+            start: 1
+        ]
+        ; nb moves
+        nb: 1
+        ; commands
+        cmd-do: compose [
+            calc/exprs-roll ( start ) ( end ) ( nb )
+            sel-expr ( expr-index )
+            _on-expr-stack-update
+        ]
+        cmd-undo: compose [
+            calc/exprs-roll ( start ) ( end ) ( negate nb )
+            sel-expr ( expr-index )
+            _on-expr-stack-update
+        ]
+        cmd: compose/only [
+            name: 'roll-clockwise
+            level: 'stack
+            cmd-do: ( cmd-do )
+            cmd-undo: ( cmd-undo )
+        ]
+        dodo cmd
+    ]
+
+    ; Roll the stack in anticlockwise order
+    ; - if no selection or selection at the top, rolls all the stack,
+    ; otherwise only the expressions from the selection to the top
+    roll-anticlockwise: function [
+        return: [logic!]
+    ][
+        ; less than two expressions nothing to roll
+        if calc/exprs-nb < 2 [
+            return false
+        ]
+        ; indexes
+        start: either expr-index == 0 [ 1 ][ expr-index ]
+        end: calc/exprs-nb
+        if start == end [
+            start: 1
+        ]
+        ; nb moves
+        nb: 1
+        ; commands
+        cmd-do: compose [
+            calc/exprs-roll ( start ) ( end ) ( negate nb )
+            sel-expr ( expr-index )
+            _on-expr-stack-update
+        ]
+        cmd-undo: compose [
+            calc/exprs-roll ( start ) ( end ) ( nb )
+            sel-expr ( expr-index )
+            _on-expr-stack-update
+        ]
+        cmd: compose/only [
+            name: 'roll-anticlockwise
+            level: 'stack
+            cmd-do: ( cmd-do )
+            cmd-undo: ( cmd-undo )
+        ]
+        dodo cmd
+    ]
+
+    ; move selection up ( decreasing index )
+    up-sel: function [
+        return: [logic!]
+    ][
+        if calc/exprs-nb < 1 [
+            return false
+        ]
+        ; nb moves
+        nb: 1
+        ; sel indexes
+        src: either expr-index > 0 [ expr-index ] [ calc/exprs-nb + 1 ]
+        dest: ( mod ( src - 1 - nb ) calc/exprs-nb ) + 1
+        ; commands
+        cmd-do: compose [ sel-expr ( dest ) ]
+        cmd-undo: compose [ 
+            sel-expr ( expr-index )
+        ]
+        cmd: compose/only [
+            name: 'up-sel
+            level: 'stack
+            cmd-do: ( cmd-do )
+            cmd-undo: ( cmd-undo )
+        ]
+        dodo cmd
+    ]
+
+    ; move selection down (decreasing index)
+    down-sel: function [
+        return: [logic!]
+    ][
+        if calc/exprs-nb < 1 [
+            return false
+        ]
+        ; nb moves
+        nb: 1
+        ; sel indexes
+        src:  either expr-index > 0 [ expr-index ] [ calc/exprs-nb ]
+        dest: ( mod ( src - 1 + nb ) calc/exprs-nb ) + 1
+        ; commands
+        cmd-do: compose [ sel-expr ( dest ) ]
+        cmd-undo: compose [ sel-expr ( expr-index ) ]
+        cmd: compose/only [
+            name: 'down-sel
+            level: 'stack
+            cmd-do: ( cmd-do )
+            cmd-undo: ( cmd-undo )
+        ]
+        dodo cmd
+    ]
+
+    ; unselect
+    no-sel: function [
+        return: [logic!]
+    ][
+        if calc/exprs-nb < 1 [
+            return false
+        ]
+        ; commands
+        cmd-do: compose [ sel-expr ( 0 ) ]
+        cmd-undo: compose [ sel-expr ( expr-index ) ]
+        cmd: compose/only [
+            name: 'down-sel
+            level: 'stack
+            cmd-do: ( cmd-do )
+            cmd-undo: ( cmd-undo )
+        ]
+        dodo cmd
     ]
 
     ;;
@@ -4603,9 +5585,6 @@ presenter: reactor [
         /keep "To keep currently undones"
     ][
 
-        ; reset the value of the last expression pulled
-        set-quiet in self 'expr-index-pulled 0
-
         ; forget undones unless they should be preserved (see enter)
         if not keep [
             forget-undones
@@ -4623,8 +5602,8 @@ presenter: reactor [
             print [ "cmd-do:" mold cmd/cmd-do ]
         ]
 
-        ; most undo/redo commands return nothing, so avoid being caught by an unset value
-        ; using set/any in case try returns unset
+        ; most undo/redo commands return unset,
+        ; to avoid an error when setting err value, use set/any instead
         set/any 'err try cmd/cmd-do
         res: either all [ value? 'err error? err ][
             if debug [ 
@@ -4659,7 +5638,7 @@ presenter: reactor [
         if debug [
             print ["Undo:" next-undo/1/name "cmd-undo:" mold next-undo/1/cmd-undo]
         ]
-        set/any 'err try next-undo/1/cmd-undo ; most command return nothing, so avoid being caught by an unset value
+        set/any 'err try next-undo/1/cmd-undo
         res: either all [ value? 'err error? err ][
             if debug [ 
                 print [ "Error encountered while undoing" next-undo/1/name ]
@@ -4687,7 +5666,7 @@ presenter: reactor [
         if debug [
             print ["Redo:" next-undo/1/name "cmd-do:" mold next-undo/1/cmd-do]
         ]
-        set/any 'err try next-undo/1/cmd-do ; most command return nothing, so avoid being caught by an unset value
+        set/any 'err try next-undo/1/cmd-do
         res: either all [ value? 'err error? err ][
             if debug [ 
                 print [ "Error encountered while redoing" next-undo/1/name ]
@@ -4713,26 +5692,358 @@ presenter: reactor [
 ;comment [
 display: object [
 
-    ; run the display
-    run: function [] [
-        view/no-wait window
-    ]
+    debug: false
+
+    ; Font used for the display
+    myfont: none
+
+    ; face window for the display
+    window: none
 
     ; localize styles
-    expr-list: expr: cmd: key: op: nbr: menu: opt: none
+    expr: cmd: key: op: nbr: menu: opt: none
 
-    ; localize hiddgen widgets
-    h: a-cmd: a-cmd-clicked: a-op: a-op-clicked: a-nbr: a-nbr-clicked: none
+    ; localize hiddgen widgets (used to manipulate styles)
+    h: a-cmd: a-cmd-clicked: a-op: a-op-clicked: a-nbr: a-nbr-clicked: a-menu: none
 
     ; localize widgets
-    the-exprs: the-trigo: none
+    the-exprs: the-trigo: the-expr: the-value: the-failed-keys: the-enter: the-zero: the-decimal: none
 
     ; to localize some values used by view actors - should not have to do that
     list: s: nb: i: none
 
+    ; tracks the view opened when a menu button is clicked
+    menu: none
 
-    ; the main stuff - the view layout
-    window: layout [
+    ; run the display
+    run: function [] [
+        _init-display
+        view/flags/no-wait window [ 'resize ]
+    ]
+
+    ; refresh the display entirely when font is changed
+    refresh: function [] [
+        unview/only window
+        self/window: none
+        run
+    ]
+
+    ; adjust the list of expressions when it changes in the model or when the window is resized
+    ; - adds extra lines at the begining to make sure the last expression always displays
+    ;   at the bottom
+    adjust-expression-list: function [ list [block! ] ] [
+
+        ; visible lines
+        line-size: size-text/with the-exprs "cosᵣ⁻¹10↑log₁₀cot₉⁻¹⁽²⁾³√"
+        list-size: the-exprs/size
+        nb-lines: to-integer round ( list-size/y / line-size/y )
+
+        the-exprs/extra/nb-voids: 0
+
+        if (length? list) < nb-lines [
+            the-exprs/extra/nb-voids: (nb-lines - length? list) ; nb void lines in the list
+            insert/dup list "" the-exprs/extra/nb-voids
+        ]
+        the-exprs/data: list
+        the-exprs/selected: none
+
+        ; reset selected expression
+        adjust-selected-expression presenter/expr-index
+
+    ]
+
+    ; adjust selected expression in the list after a list change
+    adjust-selected-expression: function [ idx [integer! ]] [
+        idx: either idx == 0 [ none ] [ idx +  the-exprs/extra/nb-voids ]
+        either idx [
+            if idx <> the-exprs/selected [
+                the-exprs/selected: idx
+            ]
+        ][
+            either the-exprs/selected [
+                the-exprs/selected: none
+            ][
+                ; make sure the list stays at the bottom
+                if the-exprs/data [
+                    the-exprs/selected: 1
+                    the-exprs/selected: length? the-exprs/data
+                    the-exprs/selected: none
+                ]
+            ]
+        ]
+    ]
+
+    ; adjust the calculator when resizing the window
+    resize: function [] [
+
+        ; default sizes and offsets
+        if debug [
+            print [
+                "default-window-size:" window/size
+                "default-exprs-size:" the-exprs/size
+                "default-expr-size:" the-expr/size
+                "default-value-size:" the-value/size
+                "default-failed-size:" the-failed-keys/size
+                "default-button-size:" the-trigo/size
+                "default-enter-size:" the-enter/size
+                "default-zero-size:" the-zero/size
+                "default-exprs-offset" the-exprs/offset
+            ]
+        ]
+        ;return
+
+        ; default values before any resize
+        default-window-size: 393x612
+        default-exprs-size: 373x105
+        default-expr-size: 372x24
+        default-value-size: 372x38
+        default-failed-size: 372x20
+        default-button-size: 74x40
+        default-enter-size: 74x81
+        default-zero-size: 149x40
+        default-exprs-offset: 10x13
+
+        ; enforce minimum size ratio 0.5
+        if any [
+            window/size/x < ( 0.5 * default-window-size/x )
+            window/size/y < ( 0.5 * default-window-size/y )
+        ][
+            window/size: as-pair 
+                max ( 0.5 * default-window-size/x ) window/size/x
+                max ( 0.5 * default-window-size/y ) window/size/y
+            if debug [
+                print [ "adjusted window size" window/size ]
+            ]
+        ]
+
+        ; size ratios
+        rx: window/size/x / default-window-size/x
+        ry: window/size/y / default-window-size/y
+
+        ; grid size
+        a-cmd/size: button-size: as-pair ( rx * default-button-size/x ) ( ry * default-button-size/y )
+        grid-width: 5 * ( button-size/x + 1 )
+        grid-height: 9 * ( button-size/y + 1 )
+
+        ; top widgets
+        the-expr/size: as-pair grid-width ( ry * default-expr-size/y )
+        the-value/size: as-pair grid-width ( ry * default-value-size/y )
+        the-failed-keys/size: as-pair grid-width ( ry * default-failed-size/y )
+        widget-height: the-expr/size/y + 1 + the-value/size/y + 1 + the-failed-keys/size/y + grid-height
+        
+        ; list
+        the-exprs/size: as-pair grid-width max ( window/size/y - 20 - widget-height ) ( ry * default-exprs-size/y )
+
+        ; widget-height
+        widget-height: widget-height + the-exprs/size/y
+
+        ; reposition top widgets
+        the-exprs/offset: as-pair ( ( window/size/x - grid-width) / 2 ) ( ( window/size/y - widget-height ) / 2 )
+        the-expr/offset: the-exprs/offset + as-pair 0 ( the-exprs/size/y + 1 )
+        the-value/offset: the-expr/offset + as-pair 0 ( the-expr/size/y + 1 )
+        the-failed-keys/offset: the-value/offset + as-pair 0 ( the-value/size/y + 1 )
+
+        ; reposition the grid
+        o: the-failed-keys/offset + as-pair 0 ( the-failed-keys/size/y + 1 )
+        i: 1
+        foreach-face/with window [
+            if find [key op nbr menu opt key-menu] face/options/style [
+                face/size: button-size
+                face/offset: o
+                either ( 0 == ( i % 5 ) ) [
+                    o: o + as-pair ( 0 - ( ( button-size/x + 1 ) * 4 ) ) ( button-size/y + 1 )
+                ][
+                    o: o + as-pair ( button-size/x + 1 ) 0
+                ]
+                i: i + 1
+            ]
+        ][ face/visible? ]
+
+        the-enter/size: as-pair button-size/x ( button-size/y * 2 + 1 )
+        the-zero/size: as-pair ( button-size/x * 2 + 1 ) button-size/y
+        the-decimal/offset: the-zero/offset + as-pair ( the-zero/size/x + 1 ) 0
+
+        ; set font sizes
+        case [
+            window/size/y < 310 [
+                the-expr/font/size: 7
+            ]
+            window/size/y < 355 [
+                the-expr/font/size: 8
+            ]
+            window/size/y < 376 [
+                the-expr/font/size: 9
+            ]
+            window/size/y < 445 [
+                the-expr/font/size: 10
+            ]
+            window/size/y < 520 [ 
+                the-expr/font/size: 11
+            ]
+            true [
+                the-expr/font/size: 12
+                
+            ]
+        ]
+        case [
+            window/size/y < 270 [
+                the-value/font/size: 10
+            ]
+            window/size/y < 280 [
+                the-value/font/size: 12
+            ]
+            window/size/y < 340 [
+                the-value/font/size: 14
+            ]
+            window/size/y < 380 [
+                the-value/font/size: 16
+            ]
+            true [
+                the-value/font/size: 18
+            ]
+        ]
+        case [
+            window/size/y < 350 [
+                the-failed-keys/font/size: 7
+            ]
+            true [
+                the-failed-keys/font/size: 8
+            ]
+        ]
+        case [
+            window/size/y < 530 [ 
+                the-exprs/font/size: 9
+            ]
+            true [
+                the-exprs/font/size: 10
+            ]
+        ]
+        case [
+            window/size/y < 350 [
+                a-cmd/font/size: 8
+                a-cmd-clicked/font/size: 10
+                a-nbr/font/size: 8
+                a-nbr-clicked/font/size: 10
+                a-op/font/size: 8
+                a-op-clicked/font/size: 10
+                a-menu/font/size: 6
+            ]
+            window/size/y < 450 [
+                a-cmd/font/size: 10
+                a-cmd-clicked/font/size: 12
+                a-op/font/size: 12
+                a-op-clicked/font/size: 14
+                a-nbr/font/size: 12
+                a-nbr-clicked/font/size: 14
+                a-menu/font/size: 8
+                if window/size/x < 280 [
+                    a-menu/font/size: 6
+                ]
+            ]
+            true [
+                a-cmd/font/size: 12
+                a-cmd-clicked/font/size: 14
+                a-op/font/size: 18
+                a-op-clicked/font/size: 20
+                a-nbr/font/size: 14
+                a-nbr-clicked/font/size: 16
+                a-menu/font/size: 10
+                if window/size/x < 320 [
+                    a-menu/font/size: 8
+                ]
+                if window/size/x < 280 [
+                    a-menu/font/size: 6
+                ]
+            ]
+        ]
+        foreach-face/with window [
+            if any [ 
+                face/options/style == 'key
+                face/options/style == 'key-menu
+            ][
+                face/font: a-cmd/font
+            ]
+            if face/options/style == 'op [
+                face/font: a-op/font
+            ]
+            if face/options/style == 'nbr [
+                face/font: a-nbr/font
+            ]
+            if face/options/style == 'menu [
+                face/font: a-menu/font
+            ]
+            if face/options/style == 'opt [
+                face/font: a-opt/font
+            ]
+        ][ find [key op nbr menu opt key-menu] face/options/style ]
+
+        ; reajust the expression list
+        adjust-expression-list copy presenter/expr-stack-as-list
+    ]
+
+    ; change a key dynamically
+    change-key: function [
+        face [object!] "Face key to update"
+        key [any-word!] "New key"
+    ] [
+        face/data: to-word key
+        face/text: presenter/key-label face/data
+    ]
+
+    ; opens up a menu
+    open-menu: function [
+        btn [object!] "Button menu"
+        evt [event!] "Original event"
+    ][
+        ; closes any menu already opened if any
+        if menu [
+            close-menu
+        ]
+        ; vid layout for option menu
+        pop: compose [
+            space 1x1
+            style menu-opt: button ( btn/size ) font-size ( btn/font/size )
+                [
+                    presenter/push-key face/data
+                    close-menu
+                    'done
+                ]
+            menu-opt "✖" [
+                close-menu
+                'done
+            ]
+        ]
+        ; completed with menu opion
+        foreach opt btn/data [
+            either opt == 'return [ append pop 'return ][
+                append pop compose [ menu-opt ( presenter/key-label opt ) data ( to-lit-word opt ) ]
+            ]
+        ]
+        self/menu: view/flags/options/no-wait pop
+            [ 'popup 'no-title 'no-border 'no-buttons ] ;'modal 
+            compose [ offset: ( evt/window/offset + btn/offset + evt/offset ) ]
+        menu/actors: context [
+            ; react to escape key - closing the menu
+            on-key: function [face [object!] event [event!]][
+                if event/key == escape [
+                    close-menu
+                    return 'done
+                ]
+            ]
+        ]
+        'done
+    ]
+
+    ; for closing an opened menu
+    close-menu: function [] [
+        if menu [
+            unview/only menu
+            self/menu: none
+        ]
+    ]
+
+    ; view layout for main window
+    lay: [
 
         title "Recalculator"
         space 1x1
@@ -4741,32 +6052,35 @@ display: object [
         h: field 0x0 hidden
 
         ;
-        ; Widget styles
+        ; Some widget styles
         ;
 
-        ; style for expression list
-        style expr-list: text-list 245.245.245 font-size 10 ; could use a different font-name also
-
         ; style for the mathematical expressions
-        style expr: text 372x24 240.240.240 font-size 12 right
+        style expr: text 372x24 240.240.240 font myfont font-size 12 right
 
-        ; style for the command button 
-        ; its displayed value is provided by the underlying model expression given
-        ; the value in data that is the value of the key
+        ; style for all buttons
+        ; the data facet should contain the key to be displayed
+        ; the label is retrieved from the model
         ; a hack allows modifying the font size so as give a feel of liveliness to the button
-        ; when clicked
-        style cmd: button 72x38 font-size 12
-            on-create [ face/text: presenter/key-label face/data ]
+        ; whenever the button is clicked
+        style cmd: button "" 72x38 font myfont font-size 12
+            on-create [
+                if face/data [
+                    face/text: presenter/key-label face/data
+                ]
+            ]
             on-down [ face/font: a-cmd-clicked/font ]
             on-up [ face/font: a-cmd/font ]
-        a-cmd: cmd 0x0 hidden "" data 'a-cmd 
-        a-cmd-clicked: cmd 0x0 hidden "" data 'a-cmd-clicked font-size 14
+        a-cmd: cmd hidden "" data 'a-cmd 
+        a-cmd-clicked: cmd hidden "" data 'a-cmd-clicked font-size 14
 
         ; default style for key buttons
         ; add the ability to push the key value to the mode
         style key: cmd
-            [ 
-                presenter/push-key face/data
+            [
+                if face/data [
+                    presenter/push-key face/data
+                ]
                 return 'done
             ]
         
@@ -4774,8 +6088,8 @@ display: object [
         style op: key font-size 18
             on-down [ face/font: a-op-clicked/font ]
             on-up [ face/font: a-op/font ]
-        a-op: op 0x0 hidden "" data 'a-op 
-        a-op-clicked: op 0x0 hidden "" data 'a-op-clicked font-size 20
+        a-op: op hidden "" data 'a-op 
+        a-op-clicked: op hidden "" data 'a-op-clicked font-size 20
         
         ; style for digits with another boldness
         ; wish I could modify the color as well but looks being impossible 
@@ -4783,37 +6097,20 @@ display: object [
         style nbr: key font-size 14 bold
             on-down [ face/font: a-nbr-clicked/font ]
             on-up [ face/font: a-nbr/font ]
-        a-nbr: nbr 0x0 hidden "" data 'a-nbr
-        a-nbr-clicked: nbr 0x0 hidden "" data 'a-nbr-clicked font-size 16
+        a-nbr: nbr hidden "" data 'a-nbr
+        a-nbr-clicked: nbr hidden "" data 'a-nbr-clicked font-size 16
 
         ; style for button menu
         ; this allows displaying a small popup window for displaying a sub-menu of keys
-        style menu: button 72x38 font-size 10
+        style menu: button 72x38 font myfont font-size 10
             with [ 
                 data: [] ; expecting key list
             ]
-            on-click [
-                pop: copy [
-                    space 1x1
-                    style menu-opt: button 65x34 font-size 10 [
-                        presenter/push-key face/data 
-                        unview
-                        return 'done
-                    ]
-                    menu-opt "×" font-size 18 [ unview ]
-                ]
-                foreach opt face/data [
-                    either opt == 'return [ append pop 'return ][
-                        append pop compose [ menu-opt ( presenter/key-label opt ) data ( to-lit-word opt ) ]
-                    ]
-                ]
-                view/flags/options pop
-                [ 'modal 'popup 'no-title 'no-border 'no-buttons ]
-                [ offset: event/window/offset + face/offset + event/offset ]
-            ]
-        
-        ; style for option button (not used currently - but will once RPN is introduced)
-        style opt: button 72x38 font-size 10
+            on-click [ open-menu face event ]
+        a-menu: menu hidden "" data [a-menu]
+
+        ; style for option button
+        style opt: button 72x38 font myfont font-size 10 ;font-color #606060
             with [
                 ; expecting key list of options
                 data: []
@@ -4821,7 +6118,7 @@ display: object [
             ]
             on-create [
                 ; select first item on creation, once data is provided
-                if 0 <> length? face/data [ 
+                if 0 < length? face/data [ 
                     face/selected: 1
                     ; note that using do-actor just means that ie. performing whatever is implemented in the actor handler
                     ; note the actual thing the system widget is doing !
@@ -4844,13 +6141,56 @@ display: object [
                     true [ rejoin [ presenter/key-label face/data/(face/selected) "…" ] ]
                 ]
             ]
+        a-opt: opt hidden "" data [a-opt]
 
-        ;here a possible usage for the option button
-        ;rpn: opt data [ regular rpn ]
-        ;    on-select [
-                ; change the model on select
-        ;        presenter/mode: face/data/(face/selected)
-        ;]
+        ; style for key menu button
+        ; key menu combines the feature of the key button and menu button
+        ; if long pressed or right pressed, a menu opens up
+        ; if clicked, an action is triggered
+        ; last action triggered is retained as default action
+        ; style key-menu: button 72x38 font myfont font-size 10
+        ;     with [
+        ;         ; expecting a menu of keys
+        ;         data: []
+        ;         selected: 0
+        ;     ]
+        ;     on-create [
+        ;         ; at creation, select first item as default action
+        ;         if 0 <> length? face/data [ 
+        ;             face/selected: 1
+        ;             do-actor face none 'change
+        ;             do-actor face none 'select
+        ;         ]
+        ;     ]
+        ;     on-down [
+        ;         ; keep track of the time to detect long press and distinguish
+        ;         ; click event
+        ;     ]
+        ;     on-up [
+        ;         ;if face/extra/down [
+        ;         ;    open-menu face event
+        ;         ;]
+        ;     ]
+        ;     on-alt-down [
+        ;         open-menu face event
+        ;     ]
+        ;     on-click [
+        ;         if all [
+        ;             face/data
+        ;             face/selected
+        ;         ][
+        ;             presenter/push-key face/data/(face/selected)
+        ;             face/text: presenter/key-label face/data/(face/selected)
+        ;         ]
+        ;     ]
+        ;     on-change [
+        ;         ; synchronize text - in case of selection
+        ;         face/text: case [
+        ;             0 == length? face/data [ "?" ]
+        ;             0 == face/selected [ "?" ]
+        ;             true [ rejoin [ presenter/key-label face/data/(face/selected) "…" ] ]
+        ;         ]
+        ;     ]
 
         ;
         ; displayed widgets from top to bottom, and left to right (bottom flow)
@@ -4859,7 +6199,8 @@ display: object [
         return ; to make sure hidden widgets before don't interfere with visible ones
 
         ; the list of expressions
-        the-exprs: expr-list 373x105
+        the-exprs: text-list 245.245.245 font myfont font-size 10 font-color 92.92.92
+            373x105
             with [
                 extra: compose [ 
                     nb-voids: 0 ; nb void line used as a filler to make sure the last line appears at the bottom
@@ -4867,59 +6208,39 @@ display: object [
                     picked: (none)  ; picked value when on-down event triggers (see on-down, on-change, on-dbl-click)
                 ] 
             ]
+            ; reacts to expression list change in the model
             react [
-                ; adjust the list of expressions that is displayed
-                ; - adds an extra line at the end of the list for unselecting (doesn't work otherwise)
-                ; - adds extra lines at the begining to make sure the last expression always displays
-                ;   at the bottom
-                list: copy presenter/expr-stack-as-list
-                face/extra/nb-voids: 0
-                if (length? list) < 6 [ ; 6 lines if font-size 10, though something more dynamic should be used
-                    face/extra/nb-voids: (6 - length? list) ; nb void lines in the list
-                    insert/dup list "" face/extra/nb-voids
-                ]
-                face/data: list
-                ; update selected status
-                face/selected: length? list ; make sure last line is always apparent
-                face/selected: none
+                adjust-expression-list copy presenter/expr-stack-as-list
             ]
-            react [ ; react to select change in model
-                s: presenter/expr-index
-                s: either s == 0 [ none ] [ s + face/extra/nb-voids ]
-                if face/selected <> s [
-                    face/selected: s
-                ]
+            ; reacts to select change in model
+            react [
+                adjust-selected-expression presenter/expr-index
             ]
+            ; mouse is clicked on the widget
             on-down [
-                ;print ["on-down picked:" event/picked " selected:" face/selected]
 
-                ;
-                ; called when mouse is clicked on the widget
                 ; event/picked == none (list clicked but not on an existing line)
                 ; event/picked == number (a line is clicked)
                 ; 
-                ; here nothing is done, just note the current selected line and the picked line
-                ; make sure also the event propagates
+                ; here nothing is done, just keep tracks of the current selected line, as well as the picked line
+                ; then make sure that the event propagates further
                 ;
-                ; the actual change takes place later in on-change event (selection) 
-                ; and on-dbl-click (double selection)
+                ; real changes take place either in the on-change event, in case of simple selection,
+                ; or in the on-dbl-click event, if a double selection was made
                 ;
 
                 ; note the current status for later
                 face/extra/selected: face/selected
                 face/extra/picked: event/picked
 
-                ; make sure event propagates (event picked/picked == face/selected - neither
-                ; on-select nor on-change after are sent)
+                ; make sure the event propagates
                 face/selected: either event/picked [ none ] [ length? face/data ]
             ]
             on-select [
-                ;print ["on-select picked:" event/picked " selected:" face/selected]
-                ; do nothing
+                ; ignored
             ]
             on-change [
-                ;print ["on-change picked:" event/picked " selected:" face/selected]
-                ; here forces the face/selected, also notifies the model
+                ; notifies the model for the selection change
                 ; possibly undo what the default handling has done
                 ; therefore don't care about the current face/selected and event/picked
                 ; but only use the ones that were kept when receiving on-down event
@@ -4928,27 +6249,26 @@ display: object [
                     face/extra/picked <= face/extra/nb-voids ; filler line selected
                     face/extra/picked == face/extra/selected ; same line selected
                 ][
-                    face/selected: none
+                    ;face/selected: none
                     attempt [ presenter/sel-expr 0 ]
                 ][
-                    face/selected: face/extra/picked
+                    ;face/selected: face/extra/picked
                     attempt [ presenter/sel-expr face/extra/picked - face/extra/nb-voids ]
                 ]
             ]
             on-dbl-click [
-                ;print ["on-dbl-click picked:" event/picked " selected:" face/selected]
                 ; here single click turn out to be a double - click
-                ; forces the selection, notifies the model and trigger the pull-expr command
+                ; notifies the model and trigger the load-expr command
                 either any [ 
                     not face/extra/picked
                     face/extra/picked <= face/extra/nb-voids
                 ][
-                    face/selected: none
+                    ;face/selected: none
                     attempt [ presenter/sel-expr 0 ]
                 ][
-                    face/selected: face/extra/picked
+                    ;face/selected: face/extra/picked
                     attempt [ presenter/sel-expr face/extra/picked - face/extra/nb-voids ]
-                    attempt [ presenter/pull-expr ]
+                    attempt [ presenter/load-expr ]
                 ]
             ]
         space 1x1
@@ -4956,7 +6276,8 @@ display: object [
 
         ; formatted expression : reacts to presenter/expr-as-string
         ; very much stupid otherwise
-        expr react [
+        the-expr: expr font-color 92.92.92
+        react [
             face/data: either ( s: presenter/expr-as-string ) == "" [
                 s
             ][
@@ -4966,15 +6287,26 @@ display: object [
         return
 
         ; value : idem with presenter/value-as-string
-        expr 372x38 font-size 18 bold
+        the-value: expr 372x38 font-size 18 bold
             react [ face/data: presenter/value-as-string ]
         return
 
         ; remaining keys : idem with presenter/failed-as-string
         pad 0x-10
-        expr 372x20 font-size 8 
+        the-failed-keys: expr 372x20 font-size 8 
             react [ face/data: presenter/failed-as-string ]
         return
+
+        ; ; option keys
+        ; opt data [ radian degree gradient ]
+        ;     on-select [ presenter/angle: face/data/(face/selected) ]
+        ; opt data [ stack-up stack-down ]
+        ;     on-select [ presenter/stack-order: face/data/(face/selected) ]
+        ; ;key-menu data [ radian degree ]
+        ; key
+        ; key
+        ; key
+        ; return
 
         ; control keys
         key data 'undo ; the styling and the use of data allows a nice and terse description of the view !
@@ -4983,11 +6315,22 @@ display: object [
             react [ face/enabled?: not head? presenter/next-undo ]
         key data 'clear-all
         key data 'clear-expr
-        key data 'back-space
+        key data 'backspace
         return
 
-        key data 'E
-        key data 'PI
+        menu "Stack..." data [
+            dup-expr swap-expr return
+            up-sel down-sel no-sel return
+            roll-clockwise roll-anticlockwise
+        ]
+        key data 'pull-expr
+        key data 'push-expr
+        key data 'down-expr
+        key data 'up-expr
+        return
+
+        key data 'E-VAL
+        key data 'PI-VAL
         key data 'pourcent
         key data 'exps
         key data 'var
@@ -5002,11 +6345,11 @@ display: object [
         return
 
         menu "Other…" data [
-            modulo remainder return
-            round ceil floor return
-            absolute factorial random
+            modulo remain return
+            rounding ceiling flooring return
+            abs factorial rand
         ]
-        key data 'negate
+        key data 'opposite
         key data 'inverse
         op data 'divide
         op data 'multiply
@@ -5025,7 +6368,7 @@ display: object [
         return
 
         menu "Power…" data [ return
-            power-2 power-3 power return
+            power-2 power-3 pow return
             square-2 square-3 square
         ]
         nbr data 'n4
@@ -5035,19 +6378,19 @@ display: object [
         return
 
         menu "Log/exp…" data [ return
-            log-10 log-e log-2 return
+            logarithm-10 logarithm-e logarithm-2 return
             exp-10 exp-e exp-2
         ]
         n1: nbr data 'n1
         nbr data 'n2
         nbr data 'n3
-        op data 'enter 72x79         ; if you play with the size...
+        the-enter: op data 'enter 72x79         ; if you play with the size...
         return
 
-        pad 0x-41                    ; you need to adjust the following line
-        the-trigo: menu "Trigo…" data [] ; see below how it is being filled
-        nbr data 'n0 147x38
-        key data 'decimal-separator
+        pad 0x-41                               ; you need to adjust the following line
+        the-trigo: menu "Trigo…" data []        ; see below how it is being filled
+        the-zero: nbr data 'n0 147x38
+        the-decimal: key data 'decimal-separator
         return
 
         do [
@@ -5085,10 +6428,25 @@ display: object [
                     ]
                 ]
             ]
+            ; change the default stack order
+            ; react [
+            ;     switch presenter/stack-order [
+            ;         stack-up [
+            ;             change-key the-roll 'roll-anticlockwise
+            ;             change-key the-move-expr 'up-expr
+            ;             change-key the-move-sel 'up-sel
+            ;         ]
+            ;         stack-down [
+            ;             change-key the-roll 'roll-clockwise
+            ;             change-key the-move-expr 'down-expr
+            ;             change-key the-move-sel 'down-sel
+            ;         ]
+            ;     ]
+            ; ]
         ]
 
     ]
-    ;windows
+    ;lay
 
     ;
     ; Temporarily used to convert a keystroke into a key entry to be fed to the model
@@ -5114,7 +6472,7 @@ display: object [
         #"-" 'subtract
         #"/" 'divide
         #"*" 'multiply
-        #"^H" 'back-space
+        #"^H" 'backspace
         #"^M" 'enter
         #"^Z" 'undo
         #"^Y" 'redo
@@ -5147,9 +6505,31 @@ display: object [
     ;; Set the window actors with on-key event handler to collect keystrokes from
     ;; the keyboard
     ;;
-    do [ ; for the compilation to turn into an evaled block
+    _init-display: function [] [
+        ; initialise the font using myfont-name parameter
+        self/myfont: make font! [name: myfont-name size: 11 color: 0.0.0]
+
+        ; initialise the window's face
+        self/window: layout compose lay
+        ; menu
+        ; window/menu: [
+        ;     "File" [
+        ;         "Run..."            run-file
+        ;         ---
+        ;         "Quit"              quit
+        ;     ]
+        ;     "Options" [
+        ;         "Choose Font..."    choose-font
+        ;         "Settings..."       settings
+        ;     ]
+        ;     "Help" [
+        ;         "About"             about-msg
+        ;     ]
+        ; ]
+        ; assign options
         window/actors: context [
             on-key: function [face [object!] event [event!]][
+                ; otherwise
                 action: select key-map event/key
                 if action [
                     f: get-face action 
@@ -5169,6 +6549,27 @@ display: object [
                 ]
                 'done ; that is said to be used (though I doubt)
             ]
+            ; track down event and possible opened menu
+            on-down: function [face [object!] event [event!]][
+                if display/menu [
+                    display/close-menu
+                ]
+            ]
+            ; on-menu: func [face [object!] event [event!] /local ft][
+            ;     switch event/picked [
+            ;         ;about-msg       [display-about]
+            ;         ;quit            [self/on-close face event]
+            ;         ;run-file        [if f: request-file [terminal/run-file f]]
+            ;         choose-font     [
+            ;             if ft: request-font/font myfont [
+            ;                 set 'myfont ft ; no set word as not interpreted correctly
+            ;                 refresh
+            ;             ]
+            ;         ]
+            ;         ;settings        [show-cfg-dialog]
+            ;     ]
+            ; ]
+            on-resize: func [face [object!] event [event!]] [ display/resize ]
         ]
     ]
 
@@ -5177,6 +6578,7 @@ display: object [
 ;]
 
 ; Display and run the recalculator
+;comment [
 run: function [] [
 
     ; new randomisation seed
@@ -5199,20 +6601,26 @@ run: function [] [
 ;recalculator
 ;]
 
-case [
-    any [
-        not system/console ; compiled version
-        system/options/script ; script ran from the command line
-    ][
-        recalculator/run
-        do-events ; start the ui event loop until the window is closed
-        'ok
-    ]
-    value? 'recalculator-test [ ; assume test is under way, let recalculator-test be in charge
-        'ok
-    ]
-    true [ ; in all other cases, assume script evaluation from a console already running
-        recalculator/run
-        'ok
+;comment [
+do [
+    case [
+        value? 'recalculator-test [ ; assume test is under way, let recalculator-test be in charge
+            'ok
+        ]
+        any [
+            not system/console ; compiled version
+            system/options/script ; script ran from the command line
+        ][
+            recalculator/run
+            do-events ; start the ui event loop until the window is closed
+            'ok
+        ]
+        true [ ; in all other cases, assume script evaluation from a console already running
+            recalculator/run
+            'ok
+        ]
     ]
 ]
+;do-case
+;]
+
